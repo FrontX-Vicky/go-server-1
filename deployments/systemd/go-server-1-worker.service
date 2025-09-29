@@ -1,0 +1,18 @@
+[Unit]
+Description=Go Server 1 (Worker)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/go-workspace/server_1/live
+ExecStart=/var/www/go-workspace/server_1/live/app-worker
+Restart=always
+User=developer
+Environment=APP_ENV=prod
+EnvironmentFile=/var/www/go-workspace/server_1/.env
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+
+

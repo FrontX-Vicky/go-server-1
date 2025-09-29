@@ -1,0 +1,36 @@
+[Unit]
+Description=Gin Web Service
+After=network.target
+
+[Service]
+Type=simple
+User=developer
+Group=developer
+Environment=APP_ENV=prod
+WorkingDirectory=/var/www/go-workspace/server_1
+EnvironmentFile=-/var/www/go-workspace/server_1/.env
+# If your app reads PORT/ADDR from env, use:
+ExecStart=/var/www/go-workspace/server_1/live/app
+# Otherwise, pass flags here, e.g.:
+# ExecStart=/var/www/gin-app/app --port=8080 --addr=0.0.0.0
+
+# Robustness
+Restart=always
+RestartSec=3
+# Increase file descriptor limit if you expect high concurrency
+LimitNOFILE=65535
+
+# If you plan to bind to ports <1024 (e.g., 80/443), either:
+# 1) run behind Nginx (recommended), OR
+# 2) grant the binary CAP_NET_BIND_SERVICE:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Security hardening (tweak as needed)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+
