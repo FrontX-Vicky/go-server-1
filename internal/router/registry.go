@@ -4,6 +4,7 @@ import (
     "github.com/gin-gonic/gin"
     "server_1/internal/core/config"
     "server_1/internal/modules/test_items"
+    // "server_1/internal/modules/reports"
 )
 
 func Build(cfg config.Config) *gin.Engine {
@@ -15,5 +16,6 @@ func Build(cfg config.Config) *gin.Engine {
 
     v1 := base.Group("/api/v1")
     test_items.MountRoutes(v1)
+    // reports.MountRoutes(v1)
     return r
 }
