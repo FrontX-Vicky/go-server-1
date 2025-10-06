@@ -27,16 +27,19 @@ func (ctl *Controller) List(c *gin.Context) {
 // GET /api/v1/reports/:id
 func (ctl *Controller) Show(c *gin.Context) {
     id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-    // optional params used for dynamic reports
-    startDate := c.Query("start_date")
-    endDate := c.Query("end_date")
-    value := c.Query("value")
+    opts := map[string]any{
+        "start_date": c.Query("start_date"),
+        "end_date": c.Query("end_date"),
+        "value": c.Query("value"),
+        "groupby": c.Query("groupby"),
+        "limit": c.Query("limit"),
+        "offset": c.Query("offset"),
+    }
+    // TODO: parse orderby param if needed (array or string)
     queryOnly := c.Query("query_only") == "1"
 
-    // If user asked for query only, build and return the SQL string
     if queryOnly {
-
-        q, err := ctl.Repo.BuildReportQuery(c.Request.Context(), id, startDate, endDate, value)
+        q, err := ctl.Repo.BuildReportQuery(c.Request.Context(), id, opts)
         if err != nil {
             if err == sql.ErrNoRows {
                 httpx.Fail(c, http.StatusNotFound, gin.H{"error": "not found"})
@@ -49,16 +52,17 @@ func (ctl *Controller) Show(c *gin.Context) {
         return
     }
 
-    meta, err := ctl.Repo.Get(c.Request.Context(), id)
+    // Run the query and return data
+    data, query, err := ctl.Repo.RunReportQuery(c.Request.Context(), id, opts)
     if err != nil {
         if err == sql.ErrNoRows {
             httpx.Fail(c, http.StatusNotFound, gin.H{"error": "not found"})
             return
         }
-        httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+        httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error(), "query": query})
         return
     }
-    httpx.OK(c, gin.H{"data": meta})
+    httpx.OK(c, gin.H{"query": query, "data": data})
 }
 
 // POST /api/v1/reports

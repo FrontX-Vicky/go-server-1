@@ -9,6 +9,154 @@ import (
     "server_1/internal/core/db"
 )
 
+
+// ReportButton represents a button for a report row.
+type ReportButton struct {
+    ButtonIcon   string `json:"button_icon"`
+    ButtonTT     string `json:"button_tt"`
+    Permission   string `json:"permission"`
+    ButtonColor  string `json:"button_color"`
+    URL          string `json:"url"`
+    ConcatID     string `json:"concat_id"`
+    Action       string `json:"action"`
+    Hide         string `json:"hide"`
+    ModuleID     int64  `json:"module_id"`
+    OnClick      string `json:"onclick"`
+    Modal        string `json:"modal"`
+    CaseName     string `json:"case_name"`
+    CheckRow     int    `json:"check_row"`
+    Query        string `json:"query"`
+}
+
+// ReportResponse is the full response for a report query.
+type ReportResponse struct {
+    Data         [][]any         `json:"data"`
+    RowID        []any           `json:"row_id"`
+    ContactID    []any           `json:"contact_id"`
+    ImageURL     []any           `json:"image_url"`
+    RowColor     []any           `json:"row_color"`
+    Header       []string        `json:"header"`
+    Icon         string          `json:"icon"`
+    ShowSR       bool            `json:"show_sr"`
+    Count        int             `json:"count"`
+    ModuleID     int64           `json:"module_id"`
+    Title        string          `json:"title"`
+    Subtitle     string          `json:"subtitle"`
+    DateFilterCol string         `json:"date_filter_col"`
+    DynamicReport bool           `json:"dynamic_report"`
+    ReportOption string          `json:"report_option"`
+    Default      int             `json:"default"`
+    Mpos         int             `json:"mpos"`
+    UIFilters    []any           `json:"ui_filters"`
+    Col          []string        `json:"col"`
+    Total        string          `json:"total"`
+    Error        int             `json:"error"`
+    ErrorMsg     string          `json:"error_msg"`
+    Message      string          `json:"message"`
+}
+
+// GetReportResponse builds the full report response including buttons and row mapping.
+func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]any) (*ReportResponse, error) {
+    meta, err := r.Get(ctx, id)
+    if err != nil {
+        return &ReportResponse{
+            Data:      [][]any{},
+            Error:     1,
+            Title:     meta.Title,
+            Subtitle:  meta.Subtitle,
+            DateFilterCol: meta.DateFilterCol,
+            DynamicReport: meta.DynamicReport,
+            ReportOption: meta.ReportOption,
+            ModuleID:  meta.ModuleID,
+            Icon:      meta.Icon,
+            ShowSR:    meta.ShowSR,
+            ErrorMsg:  "record not found",
+            Message:   "Not found",
+        }, nil
+    }
+
+    // Fetch buttons
+    btnRows, err := r.db1.QueryContext(ctx, `SELECT button_icon,button_tt,permission,button_color,url,concat_id,action,hide,module_id,onclick,modal,case_name,check_row,query FROM report_button WHERE report_id = ? AND hide <> '1'`, id)
+    if err != nil {
+        return nil, fmt.Errorf("fetch buttons: %w", err)
+    }
+    buttons := []ReportButton{}
+    for btnRows.Next() {
+        var b ReportButton
+        if err := btnRows.Scan(&b.ButtonIcon, &b.ButtonTT, &b.Permission, &b.ButtonColor, &b.URL, &b.ConcatID, &b.Action, &b.Hide, &b.ModuleID, &b.OnClick, &b.Modal, &b.CaseName, &b.CheckRow, &b.Query); err == nil {
+            buttons = append(buttons, b)
+        }
+    }
+    btnRows.Close()
+
+    // Run main report query
+    rows, _, err := r.RunReportQuery(ctx, id, opts)
+    if err != nil {
+        return nil, fmt.Errorf("run report query: %w", err)
+    }
+
+    // Prepare response fields
+    response := &ReportResponse{
+        Data:         [][]any{},
+        RowID:        []any{},
+        ContactID:    []any{},
+        ImageURL:     []any{},
+        RowColor:     []any{},
+        Header:       []string{},
+        Icon:         meta.Icon,
+        ShowSR:       meta.ShowSR,
+        Count:        len(rows),
+        ModuleID:     meta.ModuleID,
+        Title:        meta.Title,
+        Subtitle:     meta.Subtitle,
+        DateFilterCol: meta.DateFilterCol,
+        DynamicReport: meta.DynamicReport,
+        ReportOption: meta.ReportOption,
+        Default:      0,
+        Mpos:         0,
+        UIFilters:    []any{}, // TODO: fetch UI filters
+        Col:          []string{},
+        Total:        "", // TODO: compute total
+        Error:        0,
+        ErrorMsg:     "",
+        Message:      "",
+    }
+
+    // Build header from columns
+    for _, col := range meta.Columns {
+        response.Header = append(response.Header, col.Header)
+        response.Col = append(response.Col, col.ColumnName)
+    }
+
+    // Map each row
+    cnt := 1
+    for _, row := range rows {
+        temp := []any{}
+        tempBtn := []any{}
+        // Show SR
+        if meta.ShowSR {
+            temp = append(temp, map[string]any{"value": cnt, "url": "", "modal": "", "case_name": "", "data": "", "onclick": ""})
+        }
+        // Map columns
+        for _, col := range meta.Columns {
+            val := row[col.ColumnName]
+            temp = append(temp, val)
+        }
+        // TODO: Button logic (permission, hide, etc.)
+        for _, btn := range buttons {
+            // For now, just append all buttons
+            tempBtn = append(tempBtn, btn)
+        }
+        temp = append(temp, tempBtn)
+        response.Data = append(response.Data, temp)
+        cnt++
+    }
+
+    // TODO: fill extra fields (row_id, contact_id, image_url, row_color, total, ui_filters, etc.)
+
+    return response, nil
+}
+
 type Repo struct {
     db1 *sql.DB
     db2 *sql.DB
@@ -141,11 +289,21 @@ func (r *Repo) Get(ctx context.Context, id int64) (*ReportMeta, error) {
 // BuildReportQuery constructs the SQL query string for a report id using optional
 // startDate, endDate and value placeholders (used when dynamic_report is true).
 // It returns the final SQL string (without executing it).
-func (r *Repo) BuildReportQuery(ctx context.Context, id int64, startDate, endDate, value string) (string, error) {
+// BuildReportQuery builds the SQL query string for a report id using all options.
+func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]any) (string, error) {
+    // opts: start_date, end_date, value, groupby, orderby, limit, offset
     meta, err := r.Get(ctx, id)
     if err != nil {
         return "", err
     }
+    startDate, _ := opts["start_date"].(string)
+    endDate, _ := opts["end_date"].(string)
+    value, _ := opts["value"].(string)
+    groupby, _ := opts["groupby"].(string)
+    limit, _ := opts["limit"].(string)
+    offset, _ := opts["offset"].(string)
+    // orderby: []map[string]string or string
+    orderby, _ := opts["orderby"].([]map[string]string)
 
     // Build column list
     cols := []string{}
@@ -195,7 +353,6 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, startDate, endDat
         if err := rows.Scan(&name, &operator, &val); err != nil {
             return "", fmt.Errorf("scan filter: %w", err)
         }
-        // basic escaping for single quotes
         esc := strings.ReplaceAll(val, "'", "''")
         op := strings.ToUpper(strings.TrimSpace(operator))
         switch op {
@@ -208,7 +365,6 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, startDate, endDat
         case "LIKE":
             conds = append(conds, fmt.Sprintf("%s LIKE '%s'", name, esc))
         default:
-            // fallback to direct operator
             conds = append(conds, fmt.Sprintf("%s %s '%s'", name, operator, esc))
         }
     }
@@ -216,9 +372,113 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, startDate, endDat
         return "", fmt.Errorf("filters rows: %w", err)
     }
 
+    // Add date filter if present
+    if meta.DateFilterCol != "" {
+        if startDate != "" {
+            conds = append(conds, fmt.Sprintf("%s >= '%s'", meta.DateFilterCol, startDate))
+        }
+        if endDate != "" {
+            conds = append(conds, fmt.Sprintf("%s <= '%s'", meta.DateFilterCol, endDate))
+        }
+    }
+
     if len(conds) > 0 {
         query = query + " WHERE " + strings.Join(conds, " AND ")
     }
 
+    // GROUP BY
+    if groupby != "" {
+        query += " GROUP BY " + groupby
+    }
+
+    // ORDER BY
+    orderByStr := ""
+    if len(orderby) > 0 {
+        parts := []string{}
+        for _, ord := range orderby {
+            for k, v := range ord {
+                parts = append(parts, fmt.Sprintf("%s %s", k, v))
+            }
+        }
+        parts = append(parts, "id DESC")
+        orderByStr = strings.Join(parts, ", ")
+    } else {
+        // system order by
+        sysParts := []string{}
+        sysRows, err := r.db1.QueryContext(ctx, `SELECT col, order_by FROM report_order WHERE report_id = ?`, id)
+        if err == nil {
+            for sysRows.Next() {
+                var col string
+                var order int
+                if err := sysRows.Scan(&col, &order); err == nil {
+                    sysParts = append(sysParts, fmt.Sprintf("%s %s", col, map[int]string{0: "ASC", 1: "DESC"}[order]))
+                }
+            }
+            sysRows.Close()
+        }
+        if meta.DateFilterCol != "" {
+            sysParts = append(sysParts, meta.DateFilterCol+" DESC")
+        }
+        if len(sysParts) == 0 {
+            sysParts = append(sysParts, "id DESC")
+        }
+        orderByStr = strings.Join(sysParts, ", ")
+    }
+    if orderByStr != "" {
+        query += " ORDER BY " + orderByStr
+    }
+
+    // LIMIT/OFFSET
+    if limit != "" {
+        query += " LIMIT " + limit
+    }
+    if offset != "" {
+        query += " OFFSET " + offset
+    }
+
     return query, nil
+}
+
+// RunReportQuery builds and executes the report query, returning result data.
+func (r *Repo) RunReportQuery(ctx context.Context, id int64, opts map[string]any) ([]map[string]any, string, error) {
+    query, err := r.BuildReportQuery(ctx, id, opts)
+    if err != nil {
+        return nil, "", err
+    }
+    rows, err := r.db1.QueryContext(ctx, query)
+    if err != nil {
+        return nil, query, err
+    }
+    defer rows.Close()
+
+    cols, err := rows.Columns()
+    if err != nil {
+        return nil, query, err
+    }
+    result := []map[string]any{}
+    for rows.Next() {
+        vals := make([]any, len(cols))
+        ptrs := make([]any, len(cols))
+        for i := range vals {
+            ptrs[i] = &vals[i]
+        }
+        if err := rows.Scan(ptrs...); err != nil {
+            return nil, query, err
+        }
+        rowMap := map[string]any{}
+        for i, col := range cols {
+            v := vals[i]
+            // convert []byte to string for text columns
+            if b, ok := v.([]byte); ok {
+                rowMap[col] = string(b)
+            } else {
+                rowMap[col] = v
+            }
+        }
+        result = append(result, rowMap)
+    }
+    if err := rows.Err(); err != nil {
+        return nil, query, err
+    }
+    return result, query, nil
 }
