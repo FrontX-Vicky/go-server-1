@@ -73,7 +73,14 @@ func (ctl *Controller) Show(c *gin.Context) {
 		cols = []StructuredColumn{}
 	}
 
-	httpx.OK(c, gin.H{"query": query, "data": data, "columns": cols})
+	payload := gin.H{
+		// "query":   query,
+		"data":    data,
+		"columns": cols,
+	}
+
+	httpx.OK(c, payload)
+	// httpx.OK(c, gin.H{"query": query, "data": data, "columns": cols, "project": payload})
 }
 
 // POST /api/v1/reports
