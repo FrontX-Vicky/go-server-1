@@ -22,9 +22,14 @@ type FilterRequest struct {
 
 // POST /api/v1/leads/query
 func (ctl *Controller) Query(c *gin.Context) {
-	req, ok := bindFilterRequest(c)
-	if !ok {
-		return
+	var req FilterRequest
+	if c.Request.ContentLength == 0 {
+		req.Filter = nil
+	} else {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "invalid payload"})
+			return
+		}
 	}
 
 	data, err := ctl.Repo.FetchByFilters(c.Request.Context(), req.Filter)
