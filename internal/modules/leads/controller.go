@@ -61,6 +61,22 @@ func (ctl *Controller) TopSummary(c *gin.Context) {
 	httpx.OK(c, gin.H{"data": summary})
 }
 
+// POST /api/v1/leads/source-breakdown
+func (ctl *Controller) SourceBreakdown(c *gin.Context) {
+	req, ok := bindFilterRequest(c)
+	if !ok {
+		return
+	}
+
+	breakdown, err := ctl.Repo.BuildSourceBreakdown(c.Request.Context(), req.Filter)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	httpx.OK(c, gin.H{"data": breakdown})
+}
+
 func bindFilterRequest(c *gin.Context) (FilterRequest, bool) {
 	var req FilterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

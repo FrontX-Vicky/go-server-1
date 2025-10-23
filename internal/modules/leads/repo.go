@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -97,6 +98,76 @@ func (r *Repo) BuildTopSummary(ctx context.Context, filters [][]string) (*TopSum
 	}
 
 	return summary, nil
+}
+
+func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*SourceBreakdown, error) {
+	dr, err := extractDateRange(filters)
+	if err != nil {
+		return nil, err
+	}
+	baseFilters := removeDateFilters(filters)
+	periodFilters := applyDateRange(baseFilters, dr.Start, dr.End)
+
+	rows, err := r.fetchRows(ctx, periodFilters, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rows) == 0 {
+		return &SourceBreakdown{
+			Rows:  []SourceRow{},
+			Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		}, nil
+	}
+
+	countsBySource := make(map[string]*summaryCounts)
+	for _, row := range rows {
+		src := normalizeString(row["source"])
+		if src == "" {
+			src = "Unknown"
+		}
+		sc := countsBySource[src]
+		if sc == nil {
+			sc = &summaryCounts{}
+			countsBySource[src] = sc
+		}
+		accumulateCounts(sc, row)
+	}
+
+	names := make([]string, 0, len(countsBySource))
+	for name := range countsBySource {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		a := countsBySource[names[i]].TotalLeads
+		b := countsBySource[names[j]].TotalLeads
+		if a == b {
+			return names[i] < names[j]
+		}
+		return a > b
+	})
+
+	resultRows := make([]SourceRow, 0, len(names))
+	for _, name := range names {
+		counts := countsBySource[name]
+		resultRows = append(resultRows, SourceRow{
+			Source:                  name,
+			Leads:                   makeCountCell(counts.TotalLeads),
+			OrientationBooked:       makeCountCell(counts.OrientationBookings),
+			OrientationAttended:     makeCountCell(counts.OrientationAttendance),
+			Enrollments:             makeCountCell(counts.Enrollments),
+			OrientationToEnrollment: makePercentCell(rate(counts.Enrollments, counts.OrientationBookings)),
+			Spend:                   currencyCell(0),
+			CostPerLead:             naCell(),
+			CostPerEnrollment:       naCell(),
+			ROAS:                    naCell(),
+		})
+	}
+
+	return &SourceBreakdown{
+		Rows:  resultRows,
+		Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+	}, nil
 }
 
 func (r *Repo) fetchRows(ctx context.Context, filters [][]string, limitOne bool) ([]map[string]any, error) {
@@ -315,21 +386,27 @@ type summaryCounts struct {
 }
 
 func computeCounts(rows []map[string]any) summaryCounts {
-	out := summaryCounts{
-		TotalLeads: int64(len(rows)),
-	}
+	out := summaryCounts{}
 	for _, row := range rows {
-		if isTruthy(row["demo_registered"]) || isTruthy(row["demo_registered_string"]) || toInt64(row["demo_registered_count"]) > 0 {
-			out.OrientationBookings++
-		}
-		if isTruthy(row["demo_attended"]) || isTruthy(row["demo_attended_string"]) || toInt64(row["demo_attendance_count"]) > 0 {
-			out.OrientationAttendance++
-		}
-		if isTruthy(row["inquiry_converted"]) || isTruthy(row["inquiry_converted_string"]) {
-			out.Enrollments++
-		}
+		accumulateCounts(&out, row)
 	}
 	return out
+}
+
+func accumulateCounts(out *summaryCounts, row map[string]any) {
+	if out == nil {
+		return
+	}
+	out.TotalLeads++
+	if isTruthy(row["demo_registered"]) || isTruthy(row["demo_registered_string"]) || toInt64(row["demo_registered_count"]) > 0 {
+		out.OrientationBookings++
+	}
+	if isTruthy(row["demo_attended"]) || isTruthy(row["demo_attended_string"]) || toInt64(row["demo_attendance_count"]) > 0 {
+		out.OrientationAttendance++
+	}
+	if isTruthy(row["inquiry_converted"]) || isTruthy(row["inquiry_converted_string"]) {
+		out.Enrollments++
+	}
 }
 
 type TopSummary struct {
@@ -361,6 +438,24 @@ type SummaryMetadata struct {
 type RangeMeta struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
+}
+
+type SourceBreakdown struct {
+	Rows  []SourceRow `json:"rows"`
+	Range RangeMeta   `json:"range"`
+}
+
+type SourceRow struct {
+	Source                  string      `json:"source"`
+	Leads                   SummaryCell `json:"leads"`
+	OrientationBooked       SummaryCell `json:"orientation_booked"`
+	OrientationAttended     SummaryCell `json:"orientation_attended"`
+	Enrollments             SummaryCell `json:"enrollments"`
+	OrientationToEnrollment SummaryCell `json:"orientation_to_enrollment"`
+	Spend                   SummaryCell `json:"spend"`
+	CostPerLead             SummaryCell `json:"cost_per_lead"`
+	CostPerEnrollment       SummaryCell `json:"cost_per_enrollment"`
+	ROAS                    SummaryCell `json:"roas"`
 }
 
 func buildSummaryRows(week, month, prev summaryCounts) []SummaryRow {
@@ -610,3 +705,43 @@ func toInt64(val any) int64 {
 	return 0
 }
 
+func makeCountCell(v int64) SummaryCell {
+	return SummaryCell{
+		Value:   float64(v),
+		Display: formatInt(v),
+	}
+}
+
+func makePercentCell(v float64) SummaryCell {
+	return SummaryCell{
+		Value:   v,
+		Display: formatPercent(v),
+	}
+}
+
+func currencyCell(amount float64) SummaryCell {
+	if amount <= 0 {
+		return SummaryCell{Value: 0, Display: "0"}
+	}
+	return SummaryCell{
+		Value:   amount,
+		Display: fmt.Sprintf("₹%s", formatInt(int64(amount))),
+	}
+}
+
+func naCell() SummaryCell {
+	return SummaryCell{Value: 0, Display: "N/A"}
+}
+
+func normalizeString(val any) string {
+	switch v := val.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}

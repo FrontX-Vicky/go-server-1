@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"server_1/internal/core/db"
@@ -95,6 +96,8 @@ func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]
 	}
 
 	// Prepare response fields
+	counsellorSet := map[string]struct{}{}
+
 	response := &ReportResponse{
 		Data:          [][]any{},
 		RowID:         []any{},
@@ -113,7 +116,7 @@ func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]
 		ReportOption:  meta.ReportOption,
 		Default:       0,
 		Mpos:          0,
-		UIFilters:     []any{}, // TODO: fetch UI filters
+		UIFilters:     []any{},
 		Col:           []string{},
 		Total:         "", // TODO: compute total
 		Error:         0,
@@ -136,6 +139,11 @@ func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]
 		if meta.ShowSR {
 			temp = append(temp, map[string]any{"value": cnt, "url": "", "modal": "", "case_name": "", "data": "", "onclick": ""})
 		}
+		if name, ok := row["counsellor_name"]; ok {
+			if s := normalizeString(name); s != "" {
+				counsellorSet[s] = struct{}{}
+			}
+		}
 		// Map columns
 		for _, col := range meta.Columns {
 			val := row[col.ColumnName]
@@ -151,7 +159,20 @@ func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]
 		cnt++
 	}
 
-	// TODO: fill extra fields (row_id, contact_id, image_url, row_color, total, ui_filters, etc.)
+	if len(counsellorSet) > 0 {
+		names := make([]string, 0, len(counsellorSet))
+		for name := range counsellorSet {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		response.UIFilters = append(response.UIFilters, map[string]any{
+			"field":  "counsellor_name",
+			"label":  "Counsellor Name",
+			"values": names,
+		})
+	}
+
+	// TODO: fill extra fields (row_id, contact_id, image_url, row_color, total, etc.)
 
 	return response, nil
 }
@@ -465,6 +486,23 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 	}
 
 	return query, nil
+}
+
+func normalizeString(val any) string {
+	switch v := val.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "<nil>" {
+			return ""
+		}
+		return s
+	}
 }
 
 // RunReportQuery builds and executes the report query, returning result data.
