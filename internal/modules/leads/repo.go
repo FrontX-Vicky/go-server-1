@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -20,6 +21,8 @@ SELECT
 	*
 FROM inquiry_structured_report_view`
 
+var metaSourceIDs = []string{"22", "23"}
+
 var (
 	allowedOperators = map[string]struct{}{
 		"=":    {},
@@ -29,6 +32,7 @@ var (
 		"<":    {},
 		"<=":   {},
 		"LIKE": {},
+		"IN":   {},
 	}
 	columnPattern = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 )
@@ -54,25 +58,48 @@ func (r *Repo) BuildTopSummary(ctx context.Context, filters [][]string) (*TopSum
 	}
 
 	baseFilters := removeDateFilters(filters)
+	metaFilters := withMetaSourceFilter(baseFilters)
 
 	weekRange := deriveWeekRange(dr)
 	prevMonthRange := derivePreviousMonthRange(dr)
 
-	var thisWeekRows []map[string]any
+	var (
+		thisWeekRows          []map[string]any
+		thisMonthRows         []map[string]any
+		prevMonthRows         []map[string]any
+		weekSpend, monthSpend float64
+		prevMonthSpend        float64
+	)
+
 	today := truncateToDate(time.Now().In(weekRange.Start.Location()))
 	if today.Month() == dr.End.Month() && today.Year() == dr.End.Year() {
-		thisWeekRows, err = r.fetchRows(ctx, applyDateRange(baseFilters, weekRange.Start, weekRange.End), false)
+		weekFilters := applyDateRange(metaFilters, weekRange.Start, weekRange.End)
+		thisWeekRows, err = r.fetchRows(ctx, weekFilters, false)
 		if err != nil {
 			return nil, err
 		}
-	} else {
-		thisWeekRows = nil
+		weekSpend, err = r.sumMetaSpend(ctx, weekRange.Start, weekRange.End)
+		if err != nil {
+			return nil, err
+		}
 	}
-	thisMonthRows, err := r.fetchRows(ctx, applyDateRange(baseFilters, dr.Start, dr.End), false)
+
+	monthFilters := applyDateRange(metaFilters, dr.Start, dr.End)
+	thisMonthRows, err = r.fetchRows(ctx, monthFilters, false)
 	if err != nil {
 		return nil, err
 	}
-	prevMonthRows, err := r.fetchRows(ctx, applyDateRange(baseFilters, prevMonthRange.Start, prevMonthRange.End), false)
+	monthSpend, err = r.sumMetaSpend(ctx, dr.Start, dr.End)
+	if err != nil {
+		return nil, err
+	}
+
+	prevFilters := applyDateRange(metaFilters, prevMonthRange.Start, prevMonthRange.End)
+	prevMonthRows, err = r.fetchRows(ctx, prevFilters, false)
+	if err != nil {
+		return nil, err
+	}
+	prevMonthSpend, err = r.sumMetaSpend(ctx, prevMonthRange.Start, prevMonthRange.End)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +110,7 @@ func (r *Repo) BuildTopSummary(ctx context.Context, filters [][]string) (*TopSum
 
 	log.Printf("leads top summary counts | this_week=%+v this_month=%+v prev_month=%+v", weekCounts, monthCounts, prevCounts)
 
-	rows := buildSummaryRows(weekCounts, monthCounts, prevCounts)
+	rows := buildSummaryRows(weekCounts, monthCounts, prevCounts, weekSpend, monthSpend, prevMonthSpend)
 
 	summary := &TopSummary{
 		Rows: rows,
@@ -218,6 +245,25 @@ func (r *Repo) fetchRows(ctx context.Context, filters [][]string, limitOne bool)
 	return results, nil
 }
 
+func (r *Repo) sumMetaSpend(ctx context.Context, start, end time.Time) (float64, error) {
+	if r.db == nil {
+		return 0, fmt.Errorf("leads repo: database not initialized")
+	}
+	const q = `SELECT COALESCE(SUM(hfc.spend),2)
+FROM heard_from_adcost hfc
+INNER JOIN heard_from hf ON hfc.ad_id = hf.ad_id
+WHERE hfc.date BETWEEN ? AND ?`
+
+	var total sql.NullFloat64
+	if err := r.db.QueryRowContext(ctx, q, formatDate(start), formatDate(end)).Scan(&total); err != nil {
+		return 0, fmt.Errorf("meta spend: %w", err)
+	}
+	if total.Valid {
+		return total.Float64, nil
+	}
+	return 0, nil
+}
+
 func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 	query := baseQuery + " WHERE 1=1"
 	args := make([]any, 0, len(filters))
@@ -240,8 +286,26 @@ func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 		if _, ok := allowedOperators[op]; !ok {
 			return "", nil, fmt.Errorf("filter %d: operator %q not allowed", idx, op)
 		}
-		if trimmedValue == "" && op != "=" && op != "!=" {
+		if trimmedValue == "" && op != "=" && op != "!=" && op != "IN" {
 			// empty value with comparison operators collapses the result set; treat as no-op unless explicit equality check
+			continue
+		}
+
+		if op == "IN" {
+			parts := strings.Split(value, ",")
+			placeholders := make([]string, 0, len(parts))
+			for _, part := range parts {
+				val := strings.Trim(strings.TrimSpace(part), "'\"")
+				if val == "" {
+					continue
+				}
+				placeholders = append(placeholders, "?")
+				args = append(args, val)
+			}
+			if len(placeholders) == 0 {
+				continue
+			}
+			query += fmt.Sprintf(" AND %s IN (%s)", field, strings.Join(placeholders, ","))
 			continue
 		}
 
@@ -292,6 +356,16 @@ func extractDateRange(filters [][]string) (dateRange, error) {
 	return dateRange{Start: truncateToDate(*start), End: truncateToDate(*end)}, nil
 }
 
+func cloneFilters(filters [][]string) [][]string {
+	out := make([][]string, 0, len(filters))
+	for _, f := range filters {
+		cp := make([]string, len(f))
+		copy(cp, f)
+		out = append(out, cp)
+	}
+	return out
+}
+
 func removeDateFilters(filters [][]string) [][]string {
 	out := make([][]string, 0, len(filters))
 	for _, f := range filters {
@@ -308,13 +382,15 @@ func removeDateFilters(filters [][]string) [][]string {
 	return out
 }
 
+func withMetaSourceFilter(filters [][]string) [][]string {
+	out := cloneFilters(filters)
+	value := strings.Join(metaSourceIDs, ",")
+	out = append(out, []string{"primary_source_id", "IN", value})
+	return out
+}
+
 func applyDateRange(filters [][]string, start, end time.Time) [][]string {
-	out := make([][]string, 0, len(filters)+2)
-	for _, f := range filters {
-		cp := make([]string, len(f))
-		copy(cp, f)
-		out = append(out, cp)
-	}
+	out := cloneFilters(filters)
 	out = append(out, []string{"doi", ">=", formatDate(start)})
 	out = append(out, []string{"doi", "<=", formatDate(end)})
 	return out
@@ -383,6 +459,7 @@ type summaryCounts struct {
 	OrientationBookings   int64
 	OrientationAttendance int64
 	Enrollments           int64
+	Revenue               float64
 }
 
 func computeCounts(rows []map[string]any) summaryCounts {
@@ -407,6 +484,7 @@ func accumulateCounts(out *summaryCounts, row map[string]any) {
 	if isTruthy(row["inquiry_converted"]) || isTruthy(row["inquiry_converted_string"]) {
 		out.Enrollments++
 	}
+	out.Revenue += toFloat(row["payment"])
 }
 
 type TopSummary struct {
@@ -458,16 +536,18 @@ type SourceRow struct {
 	ROAS                    SummaryCell `json:"roas"`
 }
 
-func buildSummaryRows(week, month, prev summaryCounts) []SummaryRow {
+func buildSummaryRows(week summaryCounts, month summaryCounts, prev summaryCounts, weekSpend, monthSpend, prevSpend float64) []SummaryRow {
 	rows := []SummaryRow{
 		buildCountRow("Total Leads Generated", week.TotalLeads, month.TotalLeads, prev.TotalLeads, 3500),
 		buildCountRow("Orientation Bookings", week.OrientationBookings, month.OrientationBookings, prev.OrientationBookings, 2500),
 		buildCountRow("Orientation Attendance", week.OrientationAttendance, month.OrientationAttendance, prev.OrientationAttendance, 1800),
 		buildCountRow("Enrollments", week.Enrollments, month.Enrollments, prev.Enrollments, 700),
-		buildPercentRow("Orientation → Enrollment %", rate(week.Enrollments, week.OrientationBookings), rate(month.Enrollments, month.OrientationBookings), rate(prev.Enrollments, prev.OrientationBookings), 0.45),
-		buildUnavailableRow("Cost Per Lead (CPL)", "₹150"),
-		buildUnavailableRow("Cost Per Enrollment (CPE)", "₹2,500"),
-		buildUnavailableRow("ROAS", "3.5x"),
+		buildPercentRow("Orientation -> Enrollment %", rate(week.Enrollments, week.OrientationBookings), rate(month.Enrollments, month.OrientationBookings), rate(prev.Enrollments, prev.OrientationBookings), 0.45),
+		buildCostRow("Cost Per Lead (CPL)", weekSpend, week.TotalLeads, monthSpend, month.TotalLeads, prevSpend, prev.TotalLeads, 150),
+		buildCostRow("Cost Per Enrollment (CPE)", weekSpend, week.Enrollments, monthSpend, month.Enrollments, prevSpend, prev.Enrollments, 2500),
+		buildSpendRow("Total Ad Cost", weekSpend, monthSpend, prevSpend),
+		buildRevenueRow("Total Revenue", week.Revenue, month.Revenue, prev.Revenue),
+		buildROASRow("ROAS", week.Revenue, weekSpend, month.Revenue, monthSpend, prev.Revenue, prevSpend, 3.5),
 	}
 	return rows
 }
@@ -495,6 +575,29 @@ func buildCountRow(metric string, week, month, prev int64, target float64) Summa
 	}
 }
 
+func buildSpendRow(metric string, weekSpend, monthSpend, prevSpend float64) SummaryRow {
+	return SummaryRow{
+		Metric: metric,
+		ThisWeek: SummaryCell{
+			Value:   weekSpend,
+			Display: formatCurrency(weekSpend),
+		},
+		ThisMonth: SummaryCell{
+			Value:   monthSpend,
+			Display: formatCurrency(monthSpend),
+		},
+		PreviousMonth: SummaryCell{
+			Value:   prevSpend,
+			Display: formatCurrency(prevSpend),
+		},
+		PercentChangeMoM: percentageCell(percentChange(monthSpend, prevSpend)),
+		Target: SummaryCell{
+			Value:   0,
+			Display: "N/A",
+		},
+	}
+}
+
 func buildPercentRow(metric string, week, month, prev, target float64) SummaryRow {
 	return SummaryRow{
 		Metric: metric,
@@ -514,6 +617,63 @@ func buildPercentRow(metric string, week, month, prev, target float64) SummaryRo
 		Target: SummaryCell{
 			Value:   target,
 			Display: formatPercent(target),
+		},
+	}
+}
+
+func buildCostRow(metric string, weekSpend float64, weekDenom int64, monthSpend float64, monthDenom int64, prevSpend float64, prevDenom int64, target float64) SummaryRow {
+	weekCell := costCell(weekSpend, weekDenom)
+	monthCell := costCell(monthSpend, monthDenom)
+	prevCell := costCell(prevSpend, prevDenom)
+	return SummaryRow{
+		Metric:           metric,
+		ThisWeek:         weekCell,
+		ThisMonth:        monthCell,
+		PreviousMonth:    prevCell,
+		PercentChangeMoM: percentageCell(percentChange(monthCell.Value, prevCell.Value)),
+		Target: SummaryCell{
+			Value:   target,
+			Display: formatTarget(metric, target),
+		},
+	}
+}
+
+func buildRevenueRow(metric string, weekRevenue, monthRevenue, prevRevenue float64) SummaryRow {
+	return SummaryRow{
+		Metric: metric,
+		ThisWeek: SummaryCell{
+			Value:   weekRevenue,
+			Display: formatCurrency(weekRevenue),
+		},
+		ThisMonth: SummaryCell{
+			Value:   monthRevenue,
+			Display: formatCurrency(monthRevenue),
+		},
+		PreviousMonth: SummaryCell{
+			Value:   prevRevenue,
+			Display: formatCurrency(prevRevenue),
+		},
+		PercentChangeMoM: percentageCell(percentChange(monthRevenue, prevRevenue)),
+		Target: SummaryCell{
+			Value:   0,
+			Display: "N/A",
+		},
+	}
+}
+
+func buildROASRow(metric string, weekRevenue, weekSpend float64, monthRevenue, monthSpend float64, prevRevenue, prevSpend float64, target float64) SummaryRow {
+	weekCell := roasCell(weekRevenue, weekSpend)
+	monthCell := roasCell(monthRevenue, monthSpend)
+	prevCell := roasCell(prevRevenue, prevSpend)
+	return SummaryRow{
+		Metric:           metric,
+		ThisWeek:         weekCell,
+		ThisMonth:        monthCell,
+		PreviousMonth:    prevCell,
+		PercentChangeMoM: percentageCell(percentChange(monthCell.Value, prevCell.Value)),
+		Target: SummaryCell{
+			Value:   target,
+			Display: formatTarget(metric, target),
 		},
 	}
 }
@@ -595,12 +755,12 @@ func formatPercent(val float64) string {
 
 func formatPercentChange(val float64) string {
 	if val > 0.0001 {
-		return fmt.Sprintf("↑ %.1f%%", val)
+		return fmt.Sprintf("up %.1f%%", val)
 	}
 	if val < -0.0001 {
-		return fmt.Sprintf("↓ %.1f%%", -val)
+		return fmt.Sprintf("down %.1f%%", -val)
 	}
-	return "→ 0.0%"
+	return "flat 0.0%"
 }
 
 func trendFromPercent(val float64) string {
@@ -616,13 +776,38 @@ func trendFromPercent(val float64) string {
 
 func formatTarget(metric string, target float64) string {
 	switch metric {
-	case "Orientation → Enrollment %":
+	case "Orientation -> Enrollment %":
 		return formatPercent(target)
 	case "Cost Per Lead (CPL)", "Cost Per Enrollment (CPE)":
-		return fmt.Sprintf("₹%s", formatInt(int64(target)))
+		return formatCurrency(target)
+	case "ROAS":
+		return fmt.Sprintf("%.1fx", target)
 	default:
 		return formatInt(int64(target))
 	}
+}
+
+func formatCurrency(val float64) string {
+	return fmt.Sprintf("Rs %s", formatInt(int64(math.Round(val))))
+}
+
+func costCell(spend float64, denom int64) SummaryCell {
+	if spend <= 0 {
+		return SummaryCell{Value: 0, Display: formatCurrency(0)}
+	}
+	if denom <= 0 {
+		return SummaryCell{Value: 0, Display: "N/A"}
+	}
+	cost := spend / float64(denom)
+	return SummaryCell{Value: cost, Display: formatCurrency(cost)}
+}
+
+func roasCell(revenue, spend float64) SummaryCell {
+	if spend <= 0 || revenue <= 0 {
+		return SummaryCell{Value: 0, Display: "N/A"}
+	}
+	roas := revenue / spend
+	return SummaryCell{Value: roas, Display: fmt.Sprintf("%.1fx", roas)}
 }
 
 func isTruthy(val any) bool {
@@ -705,6 +890,34 @@ func toInt64(val any) int64 {
 	return 0
 }
 
+func toFloat(val any) float64 {
+	switch v := val.(type) {
+	case nil:
+		return 0
+	case float32:
+		return float64(v)
+	case float64:
+		return v
+	case int, int8, int16, int32, int64:
+		return float64(toInt64(v))
+	case uint, uint8, uint16, uint32, uint64:
+		return float64(toInt64(v))
+	case string:
+		if s, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			return s
+		}
+	case []byte:
+		if s, err := strconv.ParseFloat(strings.TrimSpace(string(v)), 64); err == nil {
+			return s
+		}
+	default:
+		if s, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(v)), 64); err == nil {
+			return s
+		}
+	}
+	return 0
+}
+
 func makeCountCell(v int64) SummaryCell {
 	return SummaryCell{
 		Value:   float64(v),
@@ -721,11 +934,11 @@ func makePercentCell(v float64) SummaryCell {
 
 func currencyCell(amount float64) SummaryCell {
 	if amount <= 0 {
-		return SummaryCell{Value: 0, Display: "0"}
+		return SummaryCell{Value: 0, Display: formatCurrency(0)}
 	}
 	return SummaryCell{
 		Value:   amount,
-		Display: fmt.Sprintf("₹%s", formatInt(int64(amount))),
+		Display: formatCurrency(amount),
 	}
 }
 
