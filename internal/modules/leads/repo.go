@@ -165,7 +165,7 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 
 	countsBySource := make(map[string]*sourceAggregate)
 	for _, row := range rows {
-		src := groupSourceName(normalizeString(row["source"]))
+		src := groupSourceName(normalizeString(row["primary_source"]))
 		agg := countsBySource[src]
 		if agg == nil {
 			agg = &sourceAggregate{}
@@ -277,9 +277,9 @@ func (r *Repo) sumMetaSpend(ctx context.Context, start, end time.Time) (float64,
 		return 0, fmt.Errorf("leads repo: database not initialized")
 	}
 	const q = `SELECT COALESCE(SUM(hfc.spend),2)
-FROM heard_from_adcost hfc
-INNER JOIN heard_from hf ON hfc.ad_id = hf.ad_id
-WHERE hfc.date BETWEEN ? AND ?`
+				FROM heard_from_adcost hfc
+				INNER JOIN heard_from hf ON hfc.ad_id = hf.ad_id
+				WHERE hfc.date BETWEEN ? AND ?`
 
 	var total sql.NullFloat64
 	if err := r.db.QueryRowContext(ctx, q, formatDate(start), formatDate(end)).Scan(&total); err != nil {
