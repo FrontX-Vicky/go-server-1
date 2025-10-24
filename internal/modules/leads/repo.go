@@ -22,6 +22,17 @@ SELECT
 FROM inquiry_structured_report_view`
 
 var metaSourceIDs = []string{"22", "23"}
+var metaSourceNames = map[string]struct{}{
+	"Instagram Ad Form": {},
+	"Facebook Ad Form":  {},
+}
+
+const metaGroupName = "Meta - Lead Form"
+
+var sourceBadges = map[string]string{
+	metaGroupName:      "PM",
+	"Google Ad Form 1": "PM",
+}
 
 var (
 	allowedOperators = map[string]struct{}{
@@ -147,18 +158,28 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 		}, nil
 	}
 
-	countsBySource := make(map[string]*summaryCounts)
+	type sourceAggregate struct {
+		counts summaryCounts
+		spend  float64
+	}
+
+	countsBySource := make(map[string]*sourceAggregate)
 	for _, row := range rows {
-		src := normalizeString(row["source"])
-		if src == "" {
-			src = "Unknown"
+		src := groupSourceName(normalizeString(row["source"]))
+		agg := countsBySource[src]
+		if agg == nil {
+			agg = &sourceAggregate{}
+			countsBySource[src] = agg
 		}
-		sc := countsBySource[src]
-		if sc == nil {
-			sc = &summaryCounts{}
-			countsBySource[src] = sc
+		accumulateCounts(&agg.counts, row)
+	}
+
+	if agg, ok := countsBySource[metaGroupName]; ok {
+		spend, err := r.sumMetaSpend(ctx, dr.Start, dr.End)
+		if err != nil {
+			return nil, err
 		}
-		accumulateCounts(sc, row)
+		agg.spend = spend
 	}
 
 	names := make([]string, 0, len(countsBySource))
@@ -166,8 +187,8 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool {
-		a := countsBySource[names[i]].TotalLeads
-		b := countsBySource[names[j]].TotalLeads
+		a := countsBySource[names[i]].counts.TotalLeads
+		b := countsBySource[names[j]].counts.TotalLeads
 		if a == b {
 			return names[i] < names[j]
 		}
@@ -176,19 +197,25 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 
 	resultRows := make([]SourceRow, 0, len(names))
 	for _, name := range names {
-		counts := countsBySource[name]
-		resultRows = append(resultRows, SourceRow{
+		agg := countsBySource[name]
+		counts := agg.counts
+		spend := agg.spend
+		row := SourceRow{
 			Source:                  name,
 			Leads:                   makeCountCell(counts.TotalLeads),
 			OrientationBooked:       makeCountCell(counts.OrientationBookings),
 			OrientationAttended:     makeCountCell(counts.OrientationAttendance),
 			Enrollments:             makeCountCell(counts.Enrollments),
-			OrientationToEnrollment: makePercentCell(rate(counts.Enrollments, counts.OrientationBookings)),
-			Spend:                   currencyCell(0),
-			CostPerLead:             naCell(),
-			CostPerEnrollment:       naCell(),
-			ROAS:                    naCell(),
-		})
+			OrientationToEnrollment: makePercentCell(rate(counts.Enrollments, counts.OrientationAttendance)),
+			Spend:                   currencyCell(spend),
+			CPL:                     costCell(spend, counts.TotalLeads),
+			CPE:                     costCell(spend, counts.Enrollments),
+			ROAS:                    roasCell(counts.Revenue, spend),
+		}
+		if badge, ok := sourceBadges[name]; ok {
+			row.SourceBadge = badge
+		}
+		resultRows = append(resultRows, row)
 	}
 
 	return &SourceBreakdown{
@@ -505,6 +532,7 @@ type SummaryCell struct {
 	Value   float64 `json:"value"`
 	Display string  `json:"display"`
 	Trend   string  `json:"trend,omitempty"`
+	Badge   string  `json:"badge,omitempty"`
 }
 
 type SummaryMetadata struct {
@@ -525,14 +553,15 @@ type SourceBreakdown struct {
 
 type SourceRow struct {
 	Source                  string      `json:"source"`
+	SourceBadge             string      `json:"source_badge,omitempty"`
 	Leads                   SummaryCell `json:"leads"`
 	OrientationBooked       SummaryCell `json:"orientation_booked"`
 	OrientationAttended     SummaryCell `json:"orientation_attended"`
 	Enrollments             SummaryCell `json:"enrollments"`
 	OrientationToEnrollment SummaryCell `json:"orientation_to_enrollment"`
 	Spend                   SummaryCell `json:"spend"`
-	CostPerLead             SummaryCell `json:"cost_per_lead"`
-	CostPerEnrollment       SummaryCell `json:"cost_per_enrollment"`
+	CPL                     SummaryCell `json:"cost_per_lead"`
+	CPE                     SummaryCell `json:"cost_per_enrollment"`
 	ROAS                    SummaryCell `json:"roas"`
 }
 
@@ -944,6 +973,17 @@ func currencyCell(amount float64) SummaryCell {
 
 func naCell() SummaryCell {
 	return SummaryCell{Value: 0, Display: "N/A"}
+}
+
+func groupSourceName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if _, ok := metaSourceNames[raw]; ok {
+		return metaGroupName
+	}
+	if raw == "" {
+		return "Unknown"
+	}
+	return raw
 }
 
 func normalizeString(val any) string {
