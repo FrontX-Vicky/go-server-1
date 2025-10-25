@@ -224,6 +224,99 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 	}, nil
 }
 
+func (r *Repo) BuildCenterPerformance(ctx context.Context, filters [][]string) (*CenterPerformance, error) {
+	dr, err := extractDateRange(filters)
+	if err != nil {
+		return nil, err
+	}
+	baseFilters := removeDateFilters(filters)
+	metaFilters := withMetaSourceFilter(baseFilters)
+	periodFilters := applyDateRange(metaFilters, dr.Start, dr.End)
+
+	rows, err := r.fetchRows(ctx, periodFilters, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rows) == 0 {
+		return &CenterPerformance{
+			Rows:  []CenterRow{},
+			Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		}, nil
+	}
+
+	type aggregate struct {
+		counts summaryCounts
+	}
+
+	countsByCity := make(map[string]*aggregate)
+	var totalLeads int64
+	for _, row := range rows {
+		city := normalizeString(row["city"])
+		if city == "" {
+			city = "Unknown"
+		}
+		agg := countsByCity[city]
+		if agg == nil {
+			agg = &aggregate{}
+			countsByCity[city] = agg
+		}
+		accumulateCounts(&agg.counts, row)
+	}
+	for _, agg := range countsByCity {
+		totalLeads += agg.counts.TotalLeads
+	}
+
+	totalSpend, err := r.sumMetaSpend(ctx, dr.Start, dr.End)
+	if err != nil {
+		return nil, err
+	}
+
+	cities := make([]string, 0, len(countsByCity))
+	for city := range countsByCity {
+		cities = append(cities, city)
+	}
+	sort.Slice(cities, func(i, j int) bool {
+		a := countsByCity[cities[i]].counts.TotalLeads
+		b := countsByCity[cities[j]].counts.TotalLeads
+		if a == b {
+			return cities[i] < cities[j]
+		}
+		return a > b
+	})
+
+	rowsOut := make([]CenterRow, 0, len(cities))
+	for _, city := range cities {
+		agg := countsByCity[city]
+		counts := agg.counts
+		spend := 0.0
+		if totalLeads > 0 {
+			spend = totalSpend * (float64(counts.TotalLeads) / float64(totalLeads))
+		}
+		showUpPct := rate(counts.OrientationAttendance, counts.OrientationBookings)
+		conversionPct := rate(counts.Enrollments, counts.OrientationAttendance)
+
+		row := CenterRow{
+			City:              city,
+			Leads:             makeCountCell(counts.TotalLeads),
+			OrientationBooked: makeCountCell(counts.OrientationBookings),
+			ShowUps:           makeCountCell(counts.OrientationAttendance),
+			Enrollments:       makeCountCell(counts.Enrollments),
+			ShowUpPercent:     makePercentCell(showUpPct),
+			ConversionPercent: makePercentCell(conversionPct),
+			CAC:               costCell(spend, counts.Enrollments),
+			Revenue:           currencyCell(counts.Revenue),
+			ROAS:              roasCell(counts.Revenue, spend),
+		}
+		rowsOut = append(rowsOut, row)
+	}
+
+	return &CenterPerformance{
+		Rows:  rowsOut,
+		Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+	}, nil
+}
+
 func (r *Repo) fetchRows(ctx context.Context, filters [][]string, limitOne bool) ([]map[string]any, error) {
 	if r.db == nil {
 		return nil, fmt.Errorf("leads repo: database not initialized")
@@ -563,6 +656,24 @@ type SourceRow struct {
 	CPL                     SummaryCell `json:"cost_per_lead"`
 	CPE                     SummaryCell `json:"cost_per_enrollment"`
 	ROAS                    SummaryCell `json:"roas"`
+}
+
+type CenterPerformance struct {
+	Rows  []CenterRow `json:"rows"`
+	Range RangeMeta   `json:"range"`
+}
+
+type CenterRow struct {
+	City              string      `json:"city"`
+	Leads             SummaryCell `json:"leads"`
+	OrientationBooked SummaryCell `json:"orientation_booked"`
+	ShowUps           SummaryCell `json:"show_ups"`
+	Enrollments       SummaryCell `json:"enrollments"`
+	ShowUpPercent     SummaryCell `json:"show_up_percent"`
+	ConversionPercent SummaryCell `json:"conversion_percent"`
+	CAC               SummaryCell `json:"cac"`
+	Revenue           SummaryCell `json:"revenue"`
+	ROAS              SummaryCell `json:"roas"`
 }
 
 func buildSummaryRows(week summaryCounts, month summaryCounts, prev summaryCounts, weekSpend, monthSpend, prevSpend float64) []SummaryRow {

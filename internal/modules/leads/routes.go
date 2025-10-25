@@ -7,5 +7,6 @@ func MountRoutes(v1 *gin.RouterGroup) {
 	ctl := &Controller{Repo: NewRepo()}
 	g.POST("/top-summary", ctl.TopSummary)
 	g.POST("/source-breakdown", ctl.SourceBreakdown)
+	g.POST("/center-performance", ctl.CenterPerformance)
 	g.POST("/query", ctl.Query)
 }
