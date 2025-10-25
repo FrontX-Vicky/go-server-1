@@ -126,12 +126,12 @@ func (r *Repo) BuildTopSummary(ctx context.Context, filters [][]string) (*TopSum
 	summary := &TopSummary{
 		Rows: rows,
 		Metadata: SummaryMetadata{
-			ThisWeek: RangeMeta{Start: formatDate(weekRange.Start), End: formatDate(weekRange.End)},
-			ThisMonth: RangeMeta{
+			ThisWeek: Range{Start: formatDate(weekRange.Start), End: formatDate(weekRange.End)},
+			ThisMonth: Range{
 				Start: formatDate(dr.Start),
 				End:   formatDate(dr.End),
 			},
-			PreviousMonth: RangeMeta{Start: formatDate(prevMonthRange.Start), End: formatDate(prevMonthRange.End)},
+			PreviousMonth: Range{Start: formatDate(prevMonthRange.Start), End: formatDate(prevMonthRange.End)},
 		},
 	}
 
@@ -154,7 +154,7 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 	if len(rows) == 0 {
 		return &SourceBreakdown{
 			Rows:  []SourceRow{},
-			Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+			Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
 		}, nil
 	}
 
@@ -220,7 +220,7 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 
 	return &SourceBreakdown{
 		Rows:  resultRows,
-		Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
 	}, nil
 }
 
@@ -240,8 +240,14 @@ func (r *Repo) BuildCenterPerformance(ctx context.Context, filters [][]string) (
 
 	if len(rows) == 0 {
 		return &CenterPerformance{
-			Rows:  []CenterRow{},
-			Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+			Rows: []CenterRow{},
+			Totals: CenterTotals{
+				Leads:             makeCountCell(0),
+				OrientationBooked: makeCountCell(0),
+				ShowUps:           makeCountCell(0),
+				Enrollments:       makeCountCell(0),
+			},
+			Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
 		}, nil
 	}
 
@@ -250,7 +256,7 @@ func (r *Repo) BuildCenterPerformance(ctx context.Context, filters [][]string) (
 	}
 
 	countsByCity := make(map[string]*aggregate)
-	var totalLeads int64
+	var totalLeads, totalBooked, totalShowUps, totalEnrollments int64
 	for _, row := range rows {
 		city := normalizeString(row["city"])
 		if city == "" {
@@ -265,6 +271,9 @@ func (r *Repo) BuildCenterPerformance(ctx context.Context, filters [][]string) (
 	}
 	for _, agg := range countsByCity {
 		totalLeads += agg.counts.TotalLeads
+		totalBooked += agg.counts.OrientationBookings
+		totalShowUps += agg.counts.OrientationAttendance
+		totalEnrollments += agg.counts.Enrollments
 	}
 
 	totalSpend, err := r.sumMetaSpend(ctx, dr.Start, dr.End)
@@ -312,8 +321,131 @@ func (r *Repo) BuildCenterPerformance(ctx context.Context, filters [][]string) (
 	}
 
 	return &CenterPerformance{
+		Rows: rowsOut,
+		Totals: CenterTotals{
+			Leads:             makeCountCell(totalLeads),
+			OrientationBooked: makeCountCell(totalBooked),
+			ShowUps:           makeCountCell(totalShowUps),
+			Enrollments:       makeCountCell(totalEnrollments),
+		},
+		Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+	}, nil
+}
+
+func (r *Repo) BuildFunnelStageTracking(ctx context.Context, filters [][]string) (*FunnelStageTracking, error) {
+	dr, err := extractDateRange(filters)
+	if err != nil {
+		return nil, err
+	}
+
+	baseFilters := removeDateFilters(filters)
+	metaFilters := withMetaSourceFilter(baseFilters)
+
+	periodFilters := applyDateRange(metaFilters, dr.Start, dr.End)
+
+	rows, err := r.fetchRows(ctx, periodFilters, false)
+	if err != nil {
+		return nil, err
+	}
+
+	counts := computeCounts(rows)
+	if counts.TotalLeads == 0 {
+		return &FunnelStageTracking{
+			Rows: []FunnelRow{
+				{Stage: "Lead Generated", Total: makeCountCell(0), PercentPrev: dashCell(), AverageDays: dashCell()},
+				{Stage: "Orientation Booked", Total: makeCountCell(0), PercentPrev: dashCell(), AverageDays: dashCell()},
+				{Stage: "Orientation Attended", Total: makeCountCell(0), PercentPrev: dashCell(), AverageDays: dashCell()},
+				{Stage: "Enrollment Confirmed", Total: makeCountCell(0), PercentPrev: dashCell(), AverageDays: dashCell()},
+				{Stage: "Orientation -> Enrollment", Total: makeCountCell(0), PercentPrev: dashCell(), AverageDays: dashCell()},
+			},
+			Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		}, nil
+	}
+
+	type durationAgg struct {
+		sum   float64
+		count int64
+	}
+	addDuration := func(agg *durationAgg, days float64) {
+		if agg == nil || days < 0 || math.IsNaN(days) || math.IsInf(days, 0) {
+			return
+		}
+		agg.sum += days
+		agg.count++
+	}
+	avgDuration := func(agg durationAgg) (float64, bool) {
+		if agg.count == 0 {
+			return 0, false
+		}
+		return agg.sum / float64(agg.count), true
+	}
+
+	var (
+		bookedDur   durationAgg
+		attendedDur durationAgg
+		enrolledDur durationAgg
+	)
+
+	for _, row := range rows {
+		leadDate, okLead := getDate(row["doi"])
+		bookDate, okBook := getDateFromFields(row,
+			"demo_registered_date", "demo_registered_datetime", "demo_registered_at", "demo_registered_ts", "demo_registered_time")
+		attendDate, okAttend := getDateConditional(row,
+			[]string{"demo_date", "demo_datetime", "demo_attended_at", "demo_attended_date"}, row["demo_attended"])
+		enrollDate, okEnroll := getDateConditional(row,
+			[]string{"date_of_conversion", "conversion_date", "enrolled_at", "enrollment_date"}, row["inquiry_converted"])
+
+		if okLead && okBook {
+			addDuration(&bookedDur, bookDate.Sub(leadDate).Hours()/24)
+		}
+		if okBook && okAttend {
+			addDuration(&attendedDur, attendDate.Sub(bookDate).Hours()/24)
+		}
+		if okAttend && okEnroll {
+			addDuration(&enrolledDur, enrollDate.Sub(attendDate).Hours()/24)
+		}
+	}
+
+	avgBook, okBookDur := avgDuration(bookedDur)
+	avgAttend, okAttendDur := avgDuration(attendedDur)
+	avgEnroll, okEnrollDur := avgDuration(enrolledDur)
+
+	rowsOut := []FunnelRow{
+		{
+			Stage:       "Lead Generated",
+			Total:       makeCountCell(counts.TotalLeads),
+			PercentPrev: dashCell(),
+			AverageDays: dashCell(),
+		},
+		{
+			Stage:       "Orientation Booked",
+			Total:       makeCountCell(counts.OrientationBookings),
+			PercentPrev: makePercentCell(rate(counts.OrientationBookings, counts.TotalLeads)),
+			AverageDays: durationCell(avgBook, okBookDur),
+		},
+		{
+			Stage:       "Orientation Attended",
+			Total:       makeCountCell(counts.OrientationAttendance),
+			PercentPrev: makePercentCell(rate(counts.OrientationAttendance, counts.OrientationBookings)),
+			AverageDays: durationCell(avgAttend, okAttendDur),
+		},
+		{
+			Stage:       "Enrollment Confirmed",
+			Total:       makeCountCell(counts.Enrollments),
+			PercentPrev: makePercentCell(rate(counts.Enrollments, counts.OrientationAttendance)),
+			AverageDays: durationCell(avgEnroll, okEnrollDur),
+		},
+		{
+			Stage:       "Orientation -> Enrollment",
+			Total:       makeCountCell(counts.Enrollments),
+			PercentPrev: makePercentCell(rate(counts.Enrollments, counts.OrientationAttendance)),
+			AverageDays: dashCell(),
+		},
+	}
+
+	return &FunnelStageTracking{
 		Rows:  rowsOut,
-		Range: RangeMeta{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
 	}, nil
 }
 
@@ -553,10 +685,23 @@ func derivePreviousMonthRange(dr dateRange) dateRange {
 }
 
 func parseDate(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0000-00-00" || value == "0000-00-00 00:00:00" {
+		return time.Time{}, fmt.Errorf("empty date")
+	}
 	layouts := []string{
 		"2006-01-02",
-		time.RFC3339,
+		"2006-01-02 15:04",
 		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.000",
+		"2006-01-02 15:04:05.000000",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04:05.000",
+		"2006-01-02T15:04:05.000000",
+		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04:05 -0700 MST",
 	}
 	for _, layout := range layouts {
 		if ts, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
@@ -629,19 +774,19 @@ type SummaryCell struct {
 }
 
 type SummaryMetadata struct {
-	ThisWeek      RangeMeta `json:"this_week"`
-	ThisMonth     RangeMeta `json:"this_month"`
-	PreviousMonth RangeMeta `json:"previous_month"`
+	ThisWeek      Range `json:"this_week"`
+	ThisMonth     Range `json:"this_month"`
+	PreviousMonth Range `json:"previous_month"`
 }
 
-type RangeMeta struct {
+type Range struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
 }
 
 type SourceBreakdown struct {
 	Rows  []SourceRow `json:"rows"`
-	Range RangeMeta   `json:"range"`
+	Range Range       `json:"range"`
 }
 
 type SourceRow struct {
@@ -659,8 +804,9 @@ type SourceRow struct {
 }
 
 type CenterPerformance struct {
-	Rows  []CenterRow `json:"rows"`
-	Range RangeMeta   `json:"range"`
+	Rows   []CenterRow  `json:"rows"`
+	Totals CenterTotals `json:"totals"`
+	Range  Range        `json:"range"`
 }
 
 type CenterRow struct {
@@ -674,6 +820,25 @@ type CenterRow struct {
 	CAC               SummaryCell `json:"cac"`
 	Revenue           SummaryCell `json:"revenue"`
 	ROAS              SummaryCell `json:"roas"`
+}
+
+type CenterTotals struct {
+	Leads             SummaryCell `json:"leads"`
+	OrientationBooked SummaryCell `json:"orientation_booked"`
+	ShowUps           SummaryCell `json:"show_ups"`
+	Enrollments       SummaryCell `json:"enrollments"`
+}
+
+type FunnelStageTracking struct {
+	Rows  []FunnelRow `json:"rows"`
+	Range Range       `json:"range"`
+}
+
+type FunnelRow struct {
+	Stage       string      `json:"stage"`
+	Total       SummaryCell `json:"total"`
+	PercentPrev SummaryCell `json:"percent_prev"`
+	AverageDays SummaryCell `json:"avg_days"`
 }
 
 func buildSummaryRows(week summaryCounts, month summaryCounts, prev summaryCounts, weekSpend, monthSpend, prevSpend float64) []SummaryRow {
@@ -1084,6 +1249,52 @@ func currencyCell(amount float64) SummaryCell {
 
 func naCell() SummaryCell {
 	return SummaryCell{Value: 0, Display: "N/A"}
+}
+
+func dashCell() SummaryCell {
+	return SummaryCell{Display: "—"}
+}
+
+func durationCell(avg float64, ok bool) SummaryCell {
+	if !ok {
+		return dashCell()
+	}
+	rounded := math.Round(avg*10) / 10
+	return SummaryCell{
+		Value:   rounded,
+		Display: fmt.Sprintf("%.1f days", rounded),
+	}
+}
+
+func getDate(val any) (time.Time, bool) {
+	s := normalizeString(val)
+	if s == "" {
+		return time.Time{}, false
+	}
+	t, err := parseDate(s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func getDateFromFields(row map[string]any, keys ...string) (time.Time, bool) {
+	for _, key := range keys {
+		if row == nil {
+			continue
+		}
+		if t, ok := getDate(row[key]); ok {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func getDateConditional(row map[string]any, keys []string, flag any) (time.Time, bool) {
+	if !isTruthy(flag) {
+		return time.Time{}, false
+	}
+	return getDateFromFields(row, keys...)
 }
 
 func groupSourceName(raw string) string {

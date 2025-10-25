@@ -93,6 +93,22 @@ func (ctl *Controller) CenterPerformance(c *gin.Context) {
 	httpx.OK(c, gin.H{"data": perf})
 }
 
+// POST /api/v1/leads/funnel-tracking
+func (ctl *Controller) FunnelStageTracking(c *gin.Context) {
+	req, ok := bindFilterRequest(c)
+	if !ok {
+		return
+	}
+
+	tracking, err := ctl.Repo.BuildFunnelStageTracking(c.Request.Context(), req.Filter)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	httpx.OK(c, gin.H{"data": tracking})
+}
+
 func bindFilterRequest(c *gin.Context) (FilterRequest, bool) {
 	var req FilterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
