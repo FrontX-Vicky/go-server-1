@@ -34,6 +34,11 @@ var sourceBadges = map[string]string{
 	"Google Ad Form 1": "PM",
 }
 
+type campaignKey struct {
+	Platform string
+	Name     string
+}
+
 var (
 	allowedOperators = map[string]struct{}{
 		"=":    {},
@@ -449,6 +454,105 @@ func (r *Repo) BuildFunnelStageTracking(ctx context.Context, filters [][]string)
 	}, nil
 }
 
+func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string) (*CampaignPerformance, error) {
+	dr, err := extractDateRange(filters)
+	if err != nil {
+		return nil, err
+	}
+
+	baseFilters := removeDateFilters(filters)
+	metaFilters := withMetaSourceFilter(baseFilters)
+	periodFilters := applyDateRange(metaFilters, dr.Start, dr.End)
+
+	rows, err := r.fetchRows(ctx, periodFilters, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rows) == 0 {
+		return &CampaignPerformance{
+			Rows:  []CampaignRow{},
+			Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		}, nil
+	}
+
+	type campaignAggregate struct {
+		counts  summaryCounts
+		revenue float64
+	}
+
+	aggregates := make(map[campaignKey]*campaignAggregate)
+	for _, row := range rows {
+		platform := normalizeString(row["primary_source"])
+		if platform == "" {
+			platform = "Unknown"
+		}
+		campaign := normalizeString(row["campaign_name"])
+		if campaign == "" {
+			campaign = "Unknown"
+		}
+		key := campaignKey{Platform: platform, Name: campaign}
+		agg := aggregates[key]
+		if agg == nil {
+			agg = &campaignAggregate{}
+			aggregates[key] = agg
+		}
+		accumulateCounts(&agg.counts, row)
+		agg.revenue += toFloat(row["payment"])
+	}
+
+	spendMap, err := r.sumMetaSpendByCampaign(ctx, dr.Start, dr.End)
+	if err != nil {
+		return nil, err
+	}
+
+	keys := make([]campaignKey, 0, len(aggregates))
+	for k := range aggregates {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a := aggregates[keys[i]].counts.TotalLeads
+		b := aggregates[keys[j]].counts.TotalLeads
+		if a == b {
+			if keys[i].Platform == keys[j].Platform {
+				return keys[i].Name < keys[j].Name
+			}
+			return keys[i].Platform < keys[j].Platform
+		}
+		return a > b
+	})
+
+	rowsOut := make([]CampaignRow, 0, len(keys))
+	for _, key := range keys {
+		agg := aggregates[key]
+		counts := agg.counts
+		spend := spendMap[key]
+
+		attPercent := rate(counts.OrientationAttendance, counts.OrientationBookings)
+		orientEnrollPercent := rate(counts.Enrollments, counts.OrientationAttendance)
+
+		rowsOut = append(rowsOut, CampaignRow{
+			Platform:                 key.Platform,
+			CampaignName:             key.Name,
+			Objective:                "Leads",
+			Leads:                    makeCountCell(counts.TotalLeads),
+			Enrollments:              makeCountCell(counts.Enrollments),
+			Spend:                    currencyCell(spend),
+			CPL:                      costCell(spend, counts.TotalLeads),
+			CPE:                      costCell(spend, counts.Enrollments),
+			OrientationAttPercent:    makePercentCell(attPercent),
+			OrientationEnrollPercent: makePercentCell(orientEnrollPercent),
+			Revenue:                  currencyCell(counts.Revenue),
+			ROAS:                     roasCell(counts.Revenue, spend),
+		})
+	}
+
+	return &CampaignPerformance{
+		Rows:  rowsOut,
+		Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+	}, nil
+}
+
 func (r *Repo) fetchRows(ctx context.Context, filters [][]string, limitOne bool) ([]map[string]any, error) {
 	if r.db == nil {
 		return nil, fmt.Errorf("leads repo: database not initialized")
@@ -515,7 +619,49 @@ func (r *Repo) sumMetaSpend(ctx context.Context, start, end time.Time) (float64,
 	}
 	return 0, nil
 }
+func (r *Repo) sumMetaSpendByCampaign(ctx context.Context, start, end time.Time) (map[campaignKey]float64, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("leads repo: database not initialized")
+	}
+	const q = `SELECT
+				c.campaign_name,
+				SUM(hfa.spend) AS spend
+				FROM heard_from_adcost AS hfa
+				JOIN heard_from AS hf
+				ON hf.ad_id = hfa.ad_id
+				JOIN campaign AS c
+				ON c.campaign_id = hf.campaign_id
+				WHERE
+				hfa.date >= ?
+								AND hfa.date < ?
+								GROUP BY
+				c.campaign_name
+				HAVING
+				SUM(hfa.spend) > 0`
+	rows, err := r.db.QueryContext(ctx, q, formatDate(start), formatDate(end))
+	if err != nil {
+		return nil, fmt.Errorf("meta spend by campaign: %w", err)
+	}
+	defer rows.Close()
 
+	result := make(map[campaignKey]float64)
+	for rows.Next() {
+		var name sql.NullString
+		var spend sql.NullFloat64
+		if err := rows.Scan(&name, &spend); err != nil {
+			return nil, fmt.Errorf("meta spend by campaign scan: %w", err)
+		}
+		key := campaignKey{
+			Platform: "Meta",
+			Name:     strings.TrimSpace(name.String),
+		}
+		result[key] = spend.Float64
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("meta spend by campaign rows: %w", err)
+	}
+	return result, nil
+}
 func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 	query := baseQuery + " WHERE 1=1"
 	args := make([]any, 0, len(filters))
@@ -839,6 +985,26 @@ type FunnelRow struct {
 	Total       SummaryCell `json:"total"`
 	PercentPrev SummaryCell `json:"percent_prev"`
 	AverageDays SummaryCell `json:"avg_days"`
+}
+
+type CampaignPerformance struct {
+	Rows  []CampaignRow `json:"rows"`
+	Range Range         `json:"range"`
+}
+
+type CampaignRow struct {
+	Platform                 string      `json:"platform"`
+	CampaignName             string      `json:"campaign_name"`
+	Objective                string      `json:"objective"`
+	Leads                    SummaryCell `json:"leads"`
+	Enrollments              SummaryCell `json:"enrollments"`
+	Spend                    SummaryCell `json:"spend"`
+	CPL                      SummaryCell `json:"cost_per_lead"`
+	CPE                      SummaryCell `json:"cost_per_enrollment"`
+	OrientationAttPercent    SummaryCell `json:"orientation_att_percent"`
+	OrientationEnrollPercent SummaryCell `json:"orientation_enroll_percent"`
+	Revenue                  SummaryCell `json:"revenue"`
+	ROAS                     SummaryCell `json:"roas"`
 }
 
 func buildSummaryRows(week summaryCounts, month summaryCounts, prev summaryCounts, weekSpend, monthSpend, prevSpend float64) []SummaryRow {

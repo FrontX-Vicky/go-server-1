@@ -8,6 +8,7 @@ func MountRoutes(v1 *gin.RouterGroup) {
 	g.POST("/top-summary", ctl.TopSummary)
 	g.POST("/source-breakdown", ctl.SourceBreakdown)
 	g.POST("/center-performance", ctl.CenterPerformance)
+	g.POST("/campaign-performance", ctl.CampaignPerformance)
 	g.POST("/funnel-tracking", ctl.FunnelStageTracking)
 	g.POST("/query", ctl.Query)
 }
