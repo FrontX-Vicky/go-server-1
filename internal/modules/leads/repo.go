@@ -536,6 +536,7 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			CampaignName:             key.Name,
 			Objective:                "Leads",
 			Leads:                    makeCountCell(counts.TotalLeads),
+			OrientationAttendance:    makeCountCell(counts.OrientationAttendance),
 			Enrollments:              makeCountCell(counts.Enrollments),
 			Spend:                    currencyCell(spend),
 			CPL:                      costCell(spend, counts.TotalLeads),
@@ -997,6 +998,7 @@ type CampaignRow struct {
 	CampaignName             string      `json:"campaign_name"`
 	Objective                string      `json:"objective"`
 	Leads                    SummaryCell `json:"leads"`
+	OrientationAttendance    SummaryCell `json:"orientation_attendance"`
 	Enrollments              SummaryCell `json:"enrollments"`
 	Spend                    SummaryCell `json:"spend"`
 	CPL                      SummaryCell `json:"cost_per_lead"`
