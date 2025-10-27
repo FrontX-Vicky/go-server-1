@@ -34,6 +34,22 @@ var sourceBadges = map[string]string{
 	"Google Ad Form 1": "PM",
 }
 
+const campaignSpendSQL = `SELECT
+	c.campaign_name,
+	SUM(hfa.spend) AS spend
+FROM heard_from_adcost AS hfa
+JOIN heard_from AS hf
+  ON hf.ad_id = hfa.ad_id
+JOIN campaign AS c
+  ON c.campaign_id = hf.campaign_id
+WHERE
+  hfa.date >= ?
+  AND hfa.date < ?
+GROUP BY
+  c.campaign_name
+HAVING
+  SUM(hfa.spend) > 0`
+
 type campaignKey struct {
 	Platform string
 	Name     string
@@ -462,16 +478,37 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 
 	baseFilters := removeDateFilters(filters)
 	metaFilters := withMetaSourceFilter(baseFilters)
-	periodFilters := applyDateRange(metaFilters, dr.Start, dr.End)
 
-	rows, err := r.fetchRows(ctx, periodFilters, false)
+	filterWithDates := applyDateRange(metaFilters, dr.Start, dr.End)
+	leadsQuery, leadArgs, err := buildQuery(filterWithDates, false)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.fetchRows(ctx, filterWithDates, false)
+	if err != nil {
+		return nil, err
+	}
+
+	spendMap, spendDebug, err := r.sumMetaSpendByCampaign(ctx, dr.Start, dr.End)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(rows) == 0 {
 		return &CampaignPerformance{
-			Rows:  []CampaignRow{},
+			Rows: []CampaignRow{},
+			Totals: CampaignTotals{
+				Leads:                 makeCountCell(0),
+				OrientationAttendance: makeCountCell(0),
+				Enrollments:           makeCountCell(0),
+				Spend:                 currencyCell(0),
+				Revenue:               currencyCell(0),
+			},
+			Queries: CampaignQueries{
+				Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
+				Spend: spendDebug,
+			},
 			Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
 		}, nil
 	}
@@ -482,12 +519,14 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 	}
 
 	aggregates := make(map[campaignKey]*campaignAggregate)
+	var totalCounts summaryCounts
+	var totalRevenue float64
 	for _, row := range rows {
 		platform := normalizeString(row["primary_source"])
 		if platform == "" {
 			platform = "Unknown"
 		}
-		campaign := normalizeString(row["campaign_name"])
+		campaign := normalizeString(row["primary_campaign_name"])
 		if campaign == "" {
 			campaign = "Unknown"
 		}
@@ -499,11 +538,8 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		}
 		accumulateCounts(&agg.counts, row)
 		agg.revenue += toFloat(row["payment"])
-	}
-
-	spendMap, err := r.sumMetaSpendByCampaign(ctx, dr.Start, dr.End)
-	if err != nil {
-		return nil, err
+		accumulateCounts(&totalCounts, row)
+		totalRevenue += toFloat(row["payment"])
 	}
 
 	keys := make([]campaignKey, 0, len(aggregates))
@@ -522,11 +558,33 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		return a > b
 	})
 
+	campaignLeadTotals := make(map[string]int64, len(aggregates))
+	campaignAttendTotals := make(map[string]int64, len(aggregates))
+	campaignRowTotals := make(map[string]int64, len(aggregates))
+	for key, agg := range aggregates {
+		campaignLeadTotals[key.Name] += agg.counts.TotalLeads
+		campaignAttendTotals[key.Name] += agg.counts.OrientationAttendance
+		campaignRowTotals[key.Name]++
+	}
+
 	rowsOut := make([]CampaignRow, 0, len(keys))
+	totalSpendAssigned := 0.0
 	for _, key := range keys {
 		agg := aggregates[key]
 		counts := agg.counts
-		spend := spendMap[key]
+		totalCampaignSpend := spendMap[key.Name]
+		share := 0.0
+		if totalCampaignSpend > 0 {
+			if campaignLeadTotals[key.Name] > 0 {
+				share = float64(counts.TotalLeads) / float64(campaignLeadTotals[key.Name])
+			} else if campaignAttendTotals[key.Name] > 0 {
+				share = float64(counts.OrientationAttendance) / float64(campaignAttendTotals[key.Name])
+			} else if campaignRowTotals[key.Name] > 0 {
+				share = 1.0 / float64(campaignRowTotals[key.Name])
+			}
+		}
+		spend := totalCampaignSpend * share
+		totalSpendAssigned += spend
 
 		attPercent := rate(counts.OrientationAttendance, counts.OrientationBookings)
 		orientEnrollPercent := rate(counts.Enrollments, counts.OrientationAttendance)
@@ -549,7 +607,18 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 	}
 
 	return &CampaignPerformance{
-		Rows:  rowsOut,
+		Rows: rowsOut,
+		Totals: CampaignTotals{
+			Leads:                 makeCountCell(totalCounts.TotalLeads),
+			OrientationAttendance: makeCountCell(totalCounts.OrientationAttendance),
+			Enrollments:           makeCountCell(totalCounts.Enrollments),
+			Spend:                 currencyCell(totalSpendAssigned),
+			Revenue:               currencyCell(totalRevenue),
+		},
+		Queries: CampaignQueries{
+			Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
+			Spend: spendDebug,
+		},
 		Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
 	}, nil
 }
@@ -620,48 +689,31 @@ func (r *Repo) sumMetaSpend(ctx context.Context, start, end time.Time) (float64,
 	}
 	return 0, nil
 }
-func (r *Repo) sumMetaSpendByCampaign(ctx context.Context, start, end time.Time) (map[campaignKey]float64, error) {
+func (r *Repo) sumMetaSpendByCampaign(ctx context.Context, start, end time.Time) (map[string]float64, QueryDebug, error) {
 	if r.db == nil {
-		return nil, fmt.Errorf("leads repo: database not initialized")
+		return nil, QueryDebug{}, fmt.Errorf("leads repo: database not initialized")
 	}
-	const q = `SELECT
-				c.campaign_name,
-				SUM(hfa.spend) AS spend
-				FROM heard_from_adcost AS hfa
-				JOIN heard_from AS hf
-				ON hf.ad_id = hfa.ad_id
-				JOIN campaign AS c
-				ON c.campaign_id = hf.campaign_id
-				WHERE
-				hfa.date >= ?
-								AND hfa.date < ?
-								GROUP BY
-				c.campaign_name
-				HAVING
-				SUM(hfa.spend) > 0`
-	rows, err := r.db.QueryContext(ctx, q, formatDate(start), formatDate(end))
+	params := []string{formatDate(start), formatDate(end)}
+	rows, err := r.db.QueryContext(ctx, campaignSpendSQL, params[0], params[1])
 	if err != nil {
-		return nil, fmt.Errorf("meta spend by campaign: %w", err)
+		return nil, QueryDebug{}, fmt.Errorf("meta spend by campaign: %w", err)
 	}
 	defer rows.Close()
 
-	result := make(map[campaignKey]float64)
+	result := make(map[string]float64)
 	for rows.Next() {
 		var name sql.NullString
 		var spend sql.NullFloat64
 		if err := rows.Scan(&name, &spend); err != nil {
-			return nil, fmt.Errorf("meta spend by campaign scan: %w", err)
+			return nil, QueryDebug{}, fmt.Errorf("meta spend by campaign scan: %w", err)
 		}
-		key := campaignKey{
-			Platform: "Meta",
-			Name:     strings.TrimSpace(name.String),
-		}
+		key := normalizeString(name.String)
 		result[key] = spend.Float64
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("meta spend by campaign rows: %w", err)
+		return nil, QueryDebug{}, fmt.Errorf("meta spend by campaign rows: %w", err)
 	}
-	return result, nil
+	return result, QueryDebug{SQL: campaignSpendSQL, Params: params}, nil
 }
 func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 	query := baseQuery + " WHERE 1=1"
@@ -989,8 +1041,10 @@ type FunnelRow struct {
 }
 
 type CampaignPerformance struct {
-	Rows  []CampaignRow `json:"rows"`
-	Range Range         `json:"range"`
+	Rows    []CampaignRow   `json:"rows"`
+	Totals  CampaignTotals  `json:"totals"`
+	Queries CampaignQueries `json:"queries"`
+	Range   Range           `json:"range"`
 }
 
 type CampaignRow struct {
@@ -1007,6 +1061,24 @@ type CampaignRow struct {
 	OrientationEnrollPercent SummaryCell `json:"orientation_enroll_percent"`
 	Revenue                  SummaryCell `json:"revenue"`
 	ROAS                     SummaryCell `json:"roas"`
+}
+
+type CampaignTotals struct {
+	Leads                 SummaryCell `json:"leads"`
+	OrientationAttendance SummaryCell `json:"orientation_attendance"`
+	Enrollments           SummaryCell `json:"enrollments"`
+	Spend                 SummaryCell `json:"spend"`
+	Revenue               SummaryCell `json:"revenue"`
+}
+
+type CampaignQueries struct {
+	Leads QueryDebug `json:"leads"`
+	Spend QueryDebug `json:"spend"`
+}
+
+type QueryDebug struct {
+	SQL    string   `json:"sql"`
+	Params []string `json:"params,omitempty"`
 }
 
 func buildSummaryRows(week summaryCounts, month summaryCounts, prev summaryCounts, weekSpend, monthSpend, prevSpend float64) []SummaryRow {
@@ -1463,6 +1535,17 @@ func getDateConditional(row map[string]any, keys []string, flag any) (time.Time,
 		return time.Time{}, false
 	}
 	return getDateFromFields(row, keys...)
+}
+
+func stringifyArgs(args []any) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make([]string, len(args))
+	for i, v := range args {
+		out[i] = fmt.Sprint(v)
+	}
+	return out
 }
 
 func groupSourceName(raw string) string {
