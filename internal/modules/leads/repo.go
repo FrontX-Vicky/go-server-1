@@ -30,8 +30,10 @@ var metaSourceNames = map[string]struct{}{
 const metaGroupName = "Meta - Lead Form"
 
 var sourceBadges = map[string]string{
-	metaGroupName:      "PM",
-	"Google Ad Form 1": "PM",
+	metaGroupName:       "PM",
+	"Google Ad Form 1":  "PM",
+	"Instagram Ad Form": "PM",
+	"Facebook Ad Form":  "PM",
 }
 
 const campaignSpendSQL = `SELECT
@@ -176,6 +178,7 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 		return &SourceBreakdown{
 			Rows:  []SourceRow{},
 			Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+			// Groups: sourceGroupsMetadata(),
 		}, nil
 	}
 
@@ -186,7 +189,8 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 
 	countsBySource := make(map[string]*sourceAggregate)
 	for _, row := range rows {
-		src := groupSourceName(normalizeString(row["primary_source"]))
+		// src := groupSourceName(normalizeString(row["primary_source"]))
+		src := normalizeString(row["primary_source"])
 		agg := countsBySource[src]
 		if agg == nil {
 			agg = &sourceAggregate{}
@@ -195,30 +199,46 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 		accumulateCounts(&agg.counts, row)
 	}
 
-	if agg, ok := countsBySource[metaGroupName]; ok {
-		spend, err := r.sumMetaSpend(ctx, dr.Start, dr.End)
-		if err != nil {
-			return nil, err
-		}
-		agg.spend = spend
+	// if agg, ok := countsBySource[metaGroupName]; ok {
+	// 	spend, err := r.sumMetaSpend(ctx, dr.Start, dr.End)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	agg.spend = spend
+	// }
+
+	type sourceEntry struct {
+		name string
+		agg  *sourceAggregate
+	}
+	entries := make([]sourceEntry, 0, len(countsBySource))
+	for name, agg := range countsBySource {
+		entries = append(entries, sourceEntry{name: name, agg: agg})
 	}
 
-	names := make([]string, 0, len(countsBySource))
-	for name := range countsBySource {
-		names = append(names, name)
-	}
-	sort.Slice(names, func(i, j int) bool {
-		a := countsBySource[names[i]].counts.TotalLeads
-		b := countsBySource[names[j]].counts.TotalLeads
-		if a == b {
-			return names[i] < names[j]
+	sort.Slice(entries, func(i, j int) bool {
+		badgeI, hasBadgeI := sourceBadges[entries[i].name]
+		badgeJ, hasBadgeJ := sourceBadges[entries[j].name]
+		if hasBadgeI != hasBadgeJ {
+			return hasBadgeI
 		}
-		return a > b
+		if hasBadgeI && hasBadgeJ {
+			if badgeI != badgeJ {
+				return badgeI < badgeJ
+			}
+		}
+		a := entries[i].agg.counts.TotalLeads
+		b := entries[j].agg.counts.TotalLeads
+		if a != b {
+			return a > b
+		}
+		return entries[i].name < entries[j].name
 	})
 
-	resultRows := make([]SourceRow, 0, len(names))
-	for _, name := range names {
-		agg := countsBySource[name]
+	resultRows := make([]SourceRow, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.name
+		agg := entry.agg
 		counts := agg.counts
 		spend := agg.spend
 		row := SourceRow{
@@ -242,6 +262,7 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 	return &SourceBreakdown{
 		Rows:  resultRows,
 		Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		// Groups: sourceGroupsMetadata(),
 	}, nil
 }
 
@@ -986,6 +1007,7 @@ type Range struct {
 type SourceBreakdown struct {
 	Rows  []SourceRow `json:"rows"`
 	Range Range       `json:"range"`
+	// Groups []SourceGroup `json:"groups,omitempty"`
 }
 
 type SourceRow struct {
@@ -1001,6 +1023,12 @@ type SourceRow struct {
 	CPE                     SummaryCell `json:"cost_per_enrollment"`
 	ROAS                    SummaryCell `json:"roas"`
 }
+
+// type SourceGroup struct {
+// 	Name      string   `json:"name"`
+// 	Sources   []string `json:"primary_source"`
+// 	SourceIDs []string `json:"primary_source_id,omitempty"`
+// }
 
 type CenterPerformance struct {
 	Rows   []CenterRow  `json:"rows"`
@@ -1558,6 +1586,29 @@ func groupSourceName(raw string) string {
 	}
 	return raw
 }
+
+// func sourceGroupsMetadata() []SourceGroup {
+// 	members := make([]string, 0, len(metaSourceNames))
+// 	for name := range metaSourceNames {
+// 		members = append(members, name)
+// 	}
+// 	if len(members) == 0 {
+// 		return nil
+// 	}
+// 	sort.Strings(members)
+//
+// 	ids := make([]string, len(metaSourceIDs))
+// 	copy(ids, metaSourceIDs)
+//
+// 	group := SourceGroup{
+// 		Name:    metaGroupName,
+// 		Sources: members,
+// 	}
+// 	if len(ids) > 0 {
+// 		group.SourceIDs = ids
+// 	}
+// 	return []SourceGroup{group}
+// }
 
 func normalizeString(val any) string {
 	switch v := val.(type) {
