@@ -52,6 +52,24 @@ GROUP BY
 HAVING
   SUM(hfa.spend) > 0`
 
+const heardFromSpendSQL = `SELECT
+	hf.id,
+	COALESCE(SUM(hfc.spend), 2) AS spend
+FROM heard_from_adcost AS hfc
+INNER JOIN heard_from AS hf
+	ON hfc.ad_id = hf.ad_id
+WHERE
+	hfc.date BETWEEN ? AND ?
+	AND hfc.spend > 0
+GROUP BY
+	hf.id`
+
+const (
+	arrowUp   = "\u2191"
+	arrowDown = "\u2193"
+	arrowFlat = "\u2192"
+)
+
 type campaignKey struct {
 	Platform string
 	Name     string
@@ -188,6 +206,7 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 	}
 
 	countsBySource := make(map[string]*sourceAggregate)
+	sourceByHeardFrom := make(map[int64]string)
 	for _, row := range rows {
 		// src := groupSourceName(normalizeString(row["primary_source"]))
 		src := normalizeString(row["primary_source"])
@@ -197,15 +216,23 @@ func (r *Repo) BuildSourceBreakdown(ctx context.Context, filters [][]string) (*S
 			countsBySource[src] = agg
 		}
 		accumulateCounts(&agg.counts, row)
+		if heardFromID := toInt64(row["primary_heard_from_id"]); heardFromID > 0 {
+			if _, exists := sourceByHeardFrom[heardFromID]; !exists {
+				sourceByHeardFrom[heardFromID] = src
+			}
+		}
 	}
 
-	// if agg, ok := countsBySource[metaGroupName]; ok {
-	// 	spend, err := r.sumMetaSpend(ctx, dr.Start, dr.End)
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-	// 	agg.spend = spend
-	// }
+	spendByHeardFrom, err := r.sumSpendByHeardFrom(ctx, dr.Start, dr.End)
+	if err != nil {
+		return nil, err
+	}
+	for heardFromID, spend := range spendByHeardFrom {
+		source := sourceByHeardFrom[heardFromID]
+		if agg := countsBySource[source]; agg != nil {
+			agg.spend += spend
+		}
+	}
 
 	type sourceEntry struct {
 		name string
@@ -709,6 +736,38 @@ func (r *Repo) sumMetaSpend(ctx context.Context, start, end time.Time) (float64,
 		return total.Float64, nil
 	}
 	return 0, nil
+}
+
+func (r *Repo) sumSpendByHeardFrom(ctx context.Context, start, end time.Time) (map[int64]float64, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("leads repo: database not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, heardFromSpendSQL, formatDate(start), formatDate(end))
+	if err != nil {
+		return nil, fmt.Errorf("heard_from spend: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]float64)
+	for rows.Next() {
+		var id sql.NullInt64
+		var spend sql.NullFloat64
+		if err := rows.Scan(&id, &spend); err != nil {
+			return nil, fmt.Errorf("heard_from spend scan: %w", err)
+		}
+		if !id.Valid {
+			continue
+		}
+		if spend.Valid {
+			result[id.Int64] = spend.Float64
+		} else {
+			result[id.Int64] = 0
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("heard_from spend rows: %w", err)
+	}
+	return result, nil
 }
 func (r *Repo) sumMetaSpendByCampaign(ctx context.Context, start, end time.Time) (map[string]float64, QueryDebug, error) {
 	if r.db == nil {
