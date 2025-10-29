@@ -22,10 +22,10 @@ SELECT
 FROM inquiry_structured_report_view`
 
 var metaSourceIDs = []string{"22", "23"}
-var metaSourceNames = map[string]struct{}{
-	"Instagram Ad Form": {},
-	"Facebook Ad Form":  {},
-}
+// var metaSourceNames = map[string]struct{}{
+// 	"Instagram Ad Form": {},
+// 	"Facebook Ad Form":  {},
+// }
 
 const metaGroupName = "Meta - Lead Form"
 
@@ -1635,16 +1635,16 @@ func stringifyArgs(args []any) []string {
 	return out
 }
 
-func groupSourceName(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if _, ok := metaSourceNames[raw]; ok {
-		return metaGroupName
-	}
-	if raw == "" {
-		return "Unknown"
-	}
-	return raw
-}
+// func groupSourceName(raw string) string {
+// 	raw = strings.TrimSpace(raw)
+// 	if _, ok := metaSourceNames[raw]; ok {
+// 		return metaGroupName
+// 	}
+// 	if raw == "" {
+// 		return "Unknown"
+// 	}
+// 	return raw
+// }
 
 // func sourceGroupsMetadata() []SourceGroup {
 // 	members := make([]string, 0, len(metaSourceNames))
