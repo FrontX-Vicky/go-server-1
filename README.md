@@ -14,26 +14,39 @@ A lean Go backend with:
 
 ```
 server_1/
-├─ cmd/
-│  ├─ api/                 # HTTP entrypoint (Gin)
-│  └─ worker/              # Background worker entrypoint
-├─ internal/
-│  ├─ bootstrap/           # process bootstrap for api
-│  ├─ core/
-│  │  ├─ config/           # env & multi-DB config
-│  │  ├─ db/               # mysql client + registry
-│  │  └─ httpx/            # response helpers
-│  ├─ router/              # HTTP routing only
-│  ├─ modules/
-│  │  └─ items/            # demo CRUD module (no migrations)
-│  ├─ events/              # (future) event types/listeners
-│  └─ worker/              # worker bootstrap (skeleton)
-├─ deployments/
-│  └─ systemd/             # systemd unit templates
-├─ scripts/
-│  └─ release.sh           # build-in-place, restart services
-├─ go.mod
-└─ .env                    # single env for API + Worker (project root)
+|-- .vscode/
+|   `-- settings.json
+|-- cmd/
+|   |-- api/                   # HTTP entrypoint (Gin)
+|   `-- worker/                # Background worker entrypoint
+|-- configs/
+|   `-- app.example.env        # sample env you can copy to .env
+|-- deployments/
+|   `-- systemd/               # systemd unit templates (API, worker, @ template)
+|-- internal/
+|   |-- bootstrap/             # process bootstrap for API
+|   |-- core/
+|   |   |-- config/            # env & multi-DB config
+|   |   |-- db/                # MySQL client + registry
+|   |   `-- httpx/             # response helpers
+|   |-- events/                # shared event types
+|   |-- modules/
+|   |   |-- debugger/          # request/response debugger hooks
+|   |   |-- dynamicapi/        # dynamic REST module builder
+|   |   |-- export/            # data export endpoints
+|   |   |-- leads/             # lead CRUD + services
+|   |   |-- reports/           # reporting endpoints
+|   |   `-- test_items/        # sample CRUD module (no migrations)
+|   |-- router/                # HTTP routing + middleware wiring
+|   `-- worker/                # worker bootstrap + listeners entry
+|-- raw/
+|   `-- subscriber.go          # example Redis Stream subscriber
+|-- scripts/
+|   |-- release.sh             # build-in-place, restart services
+|   `-- templates/             # generator templates (Redis stream subscriber)
+|-- go.mod
+|-- go.sum
+`-- .env                       # single env for API + Worker (project root)
 ```
 
 ---
@@ -184,3 +197,4 @@ If fronted by Nginx, map `/go` → `127.0.0.1:5000` and keep buffering on for JS
 - Add your real modules (controllers + services + repos).
 - Wire WebSockets under `internal/modules/ws` and mount at `/api/v1/ws`.
 - Add Redis Stream listeners for DB change events (project already structured for it).
+
