@@ -8,6 +8,7 @@ import (
 	"server_1/internal/modules/leads"
 	// "server_1/internal/modules/test_items"
 	"server_1/internal/modules/reports"
+	"server_1/internal/modules/schema"
 )
 
 func Build(cfg config.Config) *gin.Engine {
@@ -23,5 +24,6 @@ func Build(cfg config.Config) *gin.Engine {
 	export.MountRoutes(v1)
 	leads.MountRoutes(v1)
 	reports.MountRoutes(v1)
+	schema.MountRoutes(v1)
 	return r
 }
