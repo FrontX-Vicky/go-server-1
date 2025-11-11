@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"sort"
 	"strings"
 
@@ -88,6 +90,9 @@ func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]
 		}
 	}
 	btnRows.Close()
+	if err := btnRows.Err(); err != nil {
+		return nil, fmt.Errorf("buttons rows: %w", err)
+	}
 
 	// Run main report query
 	rows, _, err := r.RunReportQuery(ctx, id, opts)
@@ -437,6 +442,9 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 
 	// GROUP BY
 	if groupby != "" {
+		if !isSafeIdentifierList(groupby) {
+			return "", fmt.Errorf("invalid groupby clause")
+		}
 		query += " GROUP BY " + groupby
 	}
 
@@ -464,6 +472,9 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 				}
 			}
 			sysRows.Close()
+			if err := sysRows.Err(); err != nil {
+				return "", fmt.Errorf("report_order rows: %w", err)
+			}
 		}
 		if meta.DateFilterCol != "" {
 			sysParts = append(sysParts, meta.DateFilterCol+" DESC")
@@ -474,15 +485,22 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 		orderByStr = strings.Join(sysParts, ", ")
 	}
 	if orderByStr != "" {
+		if !isSafeOrderBy(orderByStr) {
+			return "", fmt.Errorf("invalid order by clause")
+		}
 		query += " ORDER BY " + orderByStr
 	}
 
 	// LIMIT/OFFSET
 	if limit != "" {
-		query += " LIMIT " + limit
+		lim, err := parsePositiveInt(limit, 1000)
+		if err != nil { return "", fmt.Errorf("invalid limit: %w", err) }
+		query += fmt.Sprintf(" LIMIT %d", lim)
 	}
 	if offset != "" {
-		query += " OFFSET " + offset
+		off, err := parsePositiveInt(offset, 0)
+		if err != nil { return "", fmt.Errorf("invalid offset: %w", err) }
+		query += fmt.Sprintf(" OFFSET %d", off)
 	}
 
 	return query, nil
@@ -548,3 +566,47 @@ func (r *Repo) RunReportQuery(ctx context.Context, id int64, opts map[string]any
 	}
 	return result, query, nil
 }
+
+// parsePositiveInt converts a string to a positive int with an upper bound; if empty returns the fallback.
+func parsePositiveInt(s string, fallback int) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("not a positive int")
+	}
+	return n, nil
+}
+
+// isSafeIdentifierList validates a comma-separated list of identifiers.
+func isSafeIdentifierList(list string) bool {
+	parts := strings.Split(list, ",")
+	for _, p := range parts {
+		if !reportIdentPattern.MatchString(strings.TrimSpace(p)) {
+			return false
+		}
+	}
+	return true
+}
+
+// isSafeOrderBy validates order by fragment (very conservative: col [ASC|DESC]).
+func isSafeOrderBy(ob string) bool {
+	segments := strings.Split(ob, ",")
+	for _, seg := range segments {
+		seg = strings.TrimSpace(seg)
+		if seg == "" { continue }
+		parts := strings.Fields(seg)
+		if len(parts) == 0 || len(parts) > 2 { return false }
+		col := parts[0]
+		if !reportIdentPattern.MatchString(col) { return false }
+		if len(parts) == 2 {
+			dir := strings.ToUpper(parts[1])
+			if dir != "ASC" && dir != "DESC" { return false }
+		}
+	}
+	return true
+}
+
+var reportIdentPattern = regexp.MustCompile(`^[A-Za-z0-9_\.]+$`)

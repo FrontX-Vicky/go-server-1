@@ -1,0 +1,16 @@
+[Unit]
+Description=Go API Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/go-workspace/server_1/current
+ExecStart=/var/www/go-workspace/server_1/current/app
+Restart=always
+User=developer
+Environment=APP_ENV=prod
+EnvironmentFile=/var/www/go-workspace/server_1/shared/.env
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

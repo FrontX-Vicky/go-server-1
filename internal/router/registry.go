@@ -1,6 +1,7 @@
 package router
 
 import (
+	"time"
 	"github.com/gin-gonic/gin"
 	"server_1/internal/core/config"
 	"server_1/internal/modules/dynamicapi"
@@ -13,7 +14,9 @@ import (
 
 func Build(cfg config.Config) *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery(), RequestLogger())
+	// Apply recovery, logging, and a conservative request timeout.
+	// Keep this lower than server WriteTimeout to ensure graceful cancellations.
+	r.Use(gin.Recovery(), RequestLogger(), WithTimeout(20*time.Second))
 
 	base := r.Group(cfg.Server.BasePath)
 	base.GET("/health", func(c *gin.Context) { c.String(200, "ok") })
