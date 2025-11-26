@@ -22,6 +22,7 @@ SELECT
 FROM inquiry_structured_report_view`
 
 var metaSourceIDs = []string{"22", "23"}
+
 // var metaSourceNames = map[string]struct{}{
 // 	"Instagram Ad Form": {},
 // 	"Facebook Ad Form":  {},
@@ -552,6 +553,10 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 				Enrollments:           makeCountCell(0),
 				Spend:                 currencyCell(0),
 				Revenue:               currencyCell(0),
+				SQL:                   makeCountCell(0),
+				HOT:                   makeCountCell(0),
+				WARM:                  makeCountCell(0),
+				COLD:                  makeCountCell(0),
 			},
 			Queries: CampaignQueries{
 				Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
@@ -562,13 +567,18 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 	}
 
 	type campaignAggregate struct {
-		counts  summaryCounts
-		revenue float64
+		counts    summaryCounts
+		revenue   float64
+		sqlCount  int64
+		hotCount  int64
+		warmCount int64
+		coldCount int64
 	}
 
 	aggregates := make(map[campaignKey]*campaignAggregate)
 	var totalCounts summaryCounts
 	var totalRevenue float64
+	var totalSQL, totalHOT, totalWARM, totalCOLD int64
 	for _, row := range rows {
 		platform := normalizeString(row["primary_source"])
 		if platform == "" {
@@ -586,6 +596,27 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		}
 		accumulateCounts(&agg.counts, row)
 		agg.revenue += toFloat(row["payment"])
+
+		// Count SQL flag
+		if normalizeString(row["sql_flag"]) == "Yes" {
+			agg.sqlCount++
+			totalSQL++
+		}
+
+		// Count interest_string values
+		interestStr := normalizeString(row["interest_string"])
+		switch interestStr {
+		case "Hot":
+			agg.hotCount++
+			totalHOT++
+		case "Warm":
+			agg.warmCount++
+			totalWARM++
+		case "Cold":
+			agg.coldCount++
+			totalCOLD++
+		}
+
 		accumulateCounts(&totalCounts, row)
 		totalRevenue += toFloat(row["payment"])
 	}
@@ -651,6 +682,10 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			OrientationEnrollPercent: makePercentCell(orientEnrollPercent),
 			Revenue:                  currencyCell(counts.Revenue),
 			ROAS:                     roasCell(counts.Revenue, spend),
+			SQL:                      makeCountCell(agg.sqlCount),
+			HOT:                      makeCountCell(agg.hotCount),
+			WARM:                     makeCountCell(agg.warmCount),
+			COLD:                     makeCountCell(agg.coldCount),
 		})
 	}
 
@@ -662,6 +697,10 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			Enrollments:           makeCountCell(totalCounts.Enrollments),
 			Spend:                 currencyCell(totalSpendAssigned),
 			Revenue:               currencyCell(totalRevenue),
+			SQL:                   makeCountCell(totalSQL),
+			HOT:                   makeCountCell(totalHOT),
+			WARM:                  makeCountCell(totalWARM),
+			COLD:                  makeCountCell(totalCOLD),
 		},
 		Queries: CampaignQueries{
 			Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
@@ -1148,6 +1187,10 @@ type CampaignRow struct {
 	OrientationEnrollPercent SummaryCell `json:"orientation_enroll_percent"`
 	Revenue                  SummaryCell `json:"revenue"`
 	ROAS                     SummaryCell `json:"roas"`
+	SQL                      SummaryCell `json:"sql"`
+	HOT                      SummaryCell `json:"hot"`
+	WARM                     SummaryCell `json:"warm"`
+	COLD                     SummaryCell `json:"cold"`
 }
 
 type CampaignTotals struct {
@@ -1156,6 +1199,10 @@ type CampaignTotals struct {
 	Enrollments           SummaryCell `json:"enrollments"`
 	Spend                 SummaryCell `json:"spend"`
 	Revenue               SummaryCell `json:"revenue"`
+	SQL                   SummaryCell `json:"sql"`
+	HOT                   SummaryCell `json:"hot"`
+	WARM                  SummaryCell `json:"warm"`
+	COLD                  SummaryCell `json:"cold"`
 }
 
 type CampaignQueries struct {
