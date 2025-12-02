@@ -575,24 +575,20 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		coldCount int64
 	}
 
-	aggregates := make(map[campaignKey]*campaignAggregate)
+	aggregates := make(map[string]*campaignAggregate)
 	var totalCounts summaryCounts
 	var totalRevenue float64
 	var totalSQL, totalHOT, totalWARM, totalCOLD int64
 	for _, row := range rows {
-		platform := normalizeString(row["primary_source"])
-		if platform == "" {
-			platform = "Unknown"
-		}
 		campaign := normalizeString(row["primary_campaign_name"])
 		if campaign == "" {
 			campaign = "Unknown"
 		}
-		key := campaignKey{Platform: platform, Name: campaign}
-		agg := aggregates[key]
+
+		agg := aggregates[campaign]
 		if agg == nil {
 			agg = &campaignAggregate{}
-			aggregates[key] = agg
+			aggregates[campaign] = agg
 		}
 		accumulateCounts(&agg.counts, row)
 		agg.revenue += toFloat(row["payment"])
@@ -621,56 +617,33 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		totalRevenue += toFloat(row["payment"])
 	}
 
-	keys := make([]campaignKey, 0, len(aggregates))
-	for k := range aggregates {
-		keys = append(keys, k)
+	campaignNames := make([]string, 0, len(aggregates))
+	for name := range aggregates {
+		campaignNames = append(campaignNames, name)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		a := aggregates[keys[i]].counts.TotalLeads
-		b := aggregates[keys[j]].counts.TotalLeads
+	sort.Slice(campaignNames, func(i, j int) bool {
+		a := aggregates[campaignNames[i]].counts.TotalLeads
+		b := aggregates[campaignNames[j]].counts.TotalLeads
 		if a == b {
-			if keys[i].Platform == keys[j].Platform {
-				return keys[i].Name < keys[j].Name
-			}
-			return keys[i].Platform < keys[j].Platform
+			return campaignNames[i] < campaignNames[j]
 		}
 		return a > b
 	})
 
-	campaignLeadTotals := make(map[string]int64, len(aggregates))
-	campaignAttendTotals := make(map[string]int64, len(aggregates))
-	campaignRowTotals := make(map[string]int64, len(aggregates))
-	for key, agg := range aggregates {
-		campaignLeadTotals[key.Name] += agg.counts.TotalLeads
-		campaignAttendTotals[key.Name] += agg.counts.OrientationAttendance
-		campaignRowTotals[key.Name]++
-	}
-
-	rowsOut := make([]CampaignRow, 0, len(keys))
+	rowsOut := make([]CampaignRow, 0, len(campaignNames))
 	totalSpendAssigned := 0.0
-	for _, key := range keys {
-		agg := aggregates[key]
+	for _, campaignName := range campaignNames {
+		agg := aggregates[campaignName]
 		counts := agg.counts
-		totalCampaignSpend := spendMap[key.Name]
-		share := 0.0
-		if totalCampaignSpend > 0 {
-			if campaignLeadTotals[key.Name] > 0 {
-				share = float64(counts.TotalLeads) / float64(campaignLeadTotals[key.Name])
-			} else if campaignAttendTotals[key.Name] > 0 {
-				share = float64(counts.OrientationAttendance) / float64(campaignAttendTotals[key.Name])
-			} else if campaignRowTotals[key.Name] > 0 {
-				share = 1.0 / float64(campaignRowTotals[key.Name])
-			}
-		}
-		spend := totalCampaignSpend * share
+		totalCampaignSpend := spendMap[campaignName]
+		spend := totalCampaignSpend
 		totalSpendAssigned += spend
 
 		attPercent := rate(counts.OrientationAttendance, counts.OrientationBookings)
 		orientEnrollPercent := rate(counts.Enrollments, counts.OrientationAttendance)
 
 		rowsOut = append(rowsOut, CampaignRow{
-			Platform:                 key.Platform,
-			CampaignName:             key.Name,
+			CampaignName:             campaignName,
 			Objective:                "Leads",
 			Leads:                    makeCountCell(counts.TotalLeads),
 			OrientationAttendance:    makeCountCell(counts.OrientationAttendance),
@@ -1174,7 +1147,7 @@ type CampaignPerformance struct {
 }
 
 type CampaignRow struct {
-	Platform                 string      `json:"platform"`
+	// Platform                 string      `json:"platform"`
 	CampaignName             string      `json:"campaign_name"`
 	Objective                string      `json:"objective"`
 	Leads                    SummaryCell `json:"leads"`
