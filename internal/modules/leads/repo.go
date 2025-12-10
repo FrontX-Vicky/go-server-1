@@ -539,6 +539,9 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		return nil, err
 	}
 
+	// Fetch distinct interest labels for UI (optional)
+	interestLabels, _ := r.uniqueInterestStrings(ctx)
+
 	spendMap, spendDebug, err := r.sumMetaSpendByCampaign(ctx, dr.Start, dr.End)
 	if err != nil {
 		return nil, err
@@ -562,17 +565,19 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 				Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
 				Spend: spendDebug,
 			},
-			Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+			Range:          Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+			InterestLabels: interestLabels,
 		}, nil
 	}
 
 	type campaignAggregate struct {
-		counts    summaryCounts
-		revenue   float64
-		sqlCount  int64
-		hotCount  int64
-		warmCount int64
-		coldCount int64
+		counts       summaryCounts
+		revenue      float64
+		sqlCount     int64
+		hotCount     int64
+		warmCount    int64
+		coldCount    int64
+		coldByReason map[string]int64
 	}
 
 	aggregates := make(map[string]*campaignAggregate)
@@ -587,30 +592,31 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 
 		agg := aggregates[campaign]
 		if agg == nil {
-			agg = &campaignAggregate{}
+			agg = &campaignAggregate{coldByReason: make(map[string]int64)}
 			aggregates[campaign] = agg
 		}
 		accumulateCounts(&agg.counts, row)
 		agg.revenue += toFloat(row["payment"])
 
 		// Count SQL flag
-		if normalizeString(row["sql_flag"]) == "Yes" {
+		if strings.EqualFold(normalizeString(row["sql_flag"]), "Yes") {
 			agg.sqlCount++
 			totalSQL++
 		}
 
-		// Count interest_string values
+		// Count interest_string for HOT/WARM, and breakdown reasons for COLD (anything else)
 		interestStr := normalizeString(row["interest_string"])
-		switch interestStr {
-		case "Hot":
+		if strings.EqualFold(interestStr, "Hot") {
 			agg.hotCount++
 			totalHOT++
-		case "Warm":
+		} else if strings.EqualFold(interestStr, "Warm") {
 			agg.warmCount++
 			totalWARM++
-		case "Cold":
+		} else if interestStr != "" {
+			// Treat any non-empty, non-Hot/Warm interest string as a Cold reason
 			agg.coldCount++
 			totalCOLD++
+			agg.coldByReason[interestStr] = agg.coldByReason[interestStr] + 1
 		}
 
 		accumulateCounts(&totalCounts, row)
@@ -642,6 +648,21 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		attPercent := rate(counts.OrientationAttendance, counts.OrientationBookings)
 		orientEnrollPercent := rate(counts.Enrollments, counts.OrientationAttendance)
 
+		// build cold breakdown slice from map
+		var breakdown []CountItem
+		if len(agg.coldByReason) > 0 {
+			breakdown = make([]CountItem, 0, len(agg.coldByReason))
+			for name, cnt := range agg.coldByReason {
+				breakdown = append(breakdown, CountItem{Name: name, Count: cnt})
+			}
+			sort.Slice(breakdown, func(i, j int) bool {
+				if breakdown[i].Count == breakdown[j].Count {
+					return breakdown[i].Name < breakdown[j].Name
+				}
+				return breakdown[i].Count > breakdown[j].Count
+			})
+		}
+
 		rowsOut = append(rowsOut, CampaignRow{
 			CampaignName:             campaignName,
 			Objective:                "Leads",
@@ -659,6 +680,7 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			HOT:                      makeCountCell(agg.hotCount),
 			WARM:                     makeCountCell(agg.warmCount),
 			COLD:                     makeCountCell(agg.coldCount),
+			ColdBreakdown:            breakdown,
 		})
 	}
 
@@ -679,7 +701,8 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
 			Spend: spendDebug,
 		},
-		Range: Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		Range:          Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		InterestLabels: interestLabels,
 	}, nil
 }
 
@@ -806,6 +829,39 @@ func (r *Repo) sumMetaSpendByCampaign(ctx context.Context, start, end time.Time)
 		return nil, QueryDebug{}, fmt.Errorf("meta spend by campaign rows: %w", err)
 	}
 	return result, QueryDebug{SQL: campaignSpendSQL, Params: params}, nil
+}
+
+// uniqueInterestStrings returns distinct interest_string values from the inquiry view.
+func (r *Repo) uniqueInterestStrings(ctx context.Context) ([]string, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("leads repo: database not initialized")
+	}
+	// Build using baseQuery to keep table source consistent
+	const q = `SELECT interest_string FROM (%s) AS v GROUP BY interest_string`
+	finalQ := fmt.Sprintf(q, strings.TrimSpace(baseQuery))
+	rows, err := r.db.QueryContext(ctx, finalQ)
+	if err != nil {
+		return nil, fmt.Errorf("distinct interest_string: %w", err)
+	}
+	defer rows.Close()
+
+	labels := make([]string, 0)
+	for rows.Next() {
+		var s sql.NullString
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("scan interest_string: %w", err)
+		}
+		name := normalizeString(s.String)
+		if name == "" {
+			continue
+		}
+		labels = append(labels, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows interest_string: %w", err)
+	}
+	sort.Strings(labels)
+	return labels, nil
 }
 func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 	query := baseQuery + " WHERE 1=1"
@@ -1140,10 +1196,11 @@ type FunnelRow struct {
 }
 
 type CampaignPerformance struct {
-	Rows    []CampaignRow   `json:"rows"`
-	Totals  CampaignTotals  `json:"totals"`
-	Queries CampaignQueries `json:"queries"`
-	Range   Range           `json:"range"`
+	Rows           []CampaignRow   `json:"rows"`
+	Totals         CampaignTotals  `json:"totals"`
+	Queries        CampaignQueries `json:"queries"`
+	Range          Range           `json:"range"`
+	InterestLabels []string        `json:"interest_labels,omitempty"`
 }
 
 type CampaignRow struct {
@@ -1164,6 +1221,13 @@ type CampaignRow struct {
 	HOT                      SummaryCell `json:"hot"`
 	WARM                     SummaryCell `json:"warm"`
 	COLD                     SummaryCell `json:"cold"`
+	ColdBreakdown            []CountItem `json:"cold_breakdown,omitempty"`
+}
+
+// CountItem is a simple label->count pair used for pie chart breakdowns
+type CountItem struct {
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
 }
 
 type CampaignTotals struct {
