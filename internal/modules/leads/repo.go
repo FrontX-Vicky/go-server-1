@@ -39,19 +39,16 @@ var sourceBadges = map[string]string{
 
 const campaignSpendSQL = `SELECT
 	c.campaign_name,
-	SUM(hfa.spend) AS spend
-FROM heard_from_adcost AS hfa
-JOIN heard_from AS hf
-  ON hf.ad_id = hfa.ad_id
+	COALESCE(SUM(cc.spend), 0) AS spend
+FROM campaign_cost AS cc
 JOIN campaign AS c
-  ON c.campaign_id = hf.campaign_id
+  ON c.campaign_id = cc.campaign_id
 WHERE
-  hfa.date >= ?
-  AND hfa.date < ?
+  cc.date BETWEEN ? AND ?
 GROUP BY
   c.campaign_name
 HAVING
-  SUM(hfa.spend) > 0`
+  SUM(cc.spend) > 0`
 
 const heardFromSpendSQL = `SELECT
 	hf.id,
@@ -65,6 +62,26 @@ WHERE
 GROUP BY
 	hf.id`
 
+const reinquiryCampaignSQL = `SELECT
+	primary_campaign_name,
+	COUNT(*) AS reinquiries
+FROM facebook_reinquiry_view
+WHERE
+	DATE(created_at) BETWEEN ? AND ?
+GROUP BY
+	primary_campaign_name`
+
+const reinquiryHeardFromSQL = `SELECT
+	primary_heard_from_id,
+	primary_heard_from,
+	COUNT(*) AS reinquiries
+FROM facebook_reinquiry_view
+WHERE
+	DATE(created_at) BETWEEN ? AND ?
+GROUP BY
+	primary_heard_from_id,
+	primary_heard_from`
+
 const (
 	arrowUp   = "\u2191"
 	arrowDown = "\u2193"
@@ -74,6 +91,11 @@ const (
 type campaignKey struct {
 	Platform string
 	Name     string
+}
+
+type heardFromKey struct {
+	ID   int64
+	Name string
 }
 
 var (
@@ -457,7 +479,7 @@ func (r *Repo) BuildFunnelStageTracking(ctx context.Context, filters [][]string)
 	)
 
 	for _, row := range rows {
-		leadDate, okLead := getDate(row["doi"])
+		leadDate, okLead := getDate(row["doi_created"])
 		bookDate, okBook := getDateFromFields(row,
 			"demo_registered_date", "demo_registered_datetime", "demo_registered_at", "demo_registered_ts", "demo_registered_time")
 		attendDate, okAttend := getDateConditional(row,
@@ -547,11 +569,17 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		return nil, err
 	}
 
+	reinquiryByCampaign, err := r.countReinquiriesByCampaign(ctx, dr.Start, dr.End)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(rows) == 0 {
 		return &CampaignPerformance{
 			Rows: []CampaignRow{},
 			Totals: CampaignTotals{
 				Leads:                 makeCountCell(0),
+				Reinquiries:           makeCountCell(0),
 				OrientationAttendance: makeCountCell(0),
 				Enrollments:           makeCountCell(0),
 				Spend:                 currencyCell(0),
@@ -584,6 +612,7 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 	var totalCounts summaryCounts
 	var totalRevenue float64
 	var totalSQL, totalHOT, totalWARM, totalCOLD int64
+	var totalReinquiries int64
 	for _, row := range rows {
 		campaign := normalizeString(row["primary_campaign_name"])
 		if campaign == "" {
@@ -667,6 +696,7 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			CampaignName:             campaignName,
 			Objective:                "Leads",
 			Leads:                    makeCountCell(counts.TotalLeads),
+			Reinquiries:              makeCountCell(reinquiryByCampaign[campaignName]),
 			OrientationAttendance:    makeCountCell(counts.OrientationAttendance),
 			Enrollments:              makeCountCell(counts.Enrollments),
 			Spend:                    currencyCell(spend),
@@ -682,12 +712,15 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			COLD:                     makeCountCell(agg.coldCount),
 			ColdBreakdown:            breakdown,
 		})
+
+		totalReinquiries += reinquiryByCampaign[campaignName]
 	}
 
 	return &CampaignPerformance{
 		Rows: rowsOut,
 		Totals: CampaignTotals{
 			Leads:                 makeCountCell(totalCounts.TotalLeads),
+			Reinquiries:           makeCountCell(totalReinquiries),
 			OrientationAttendance: makeCountCell(totalCounts.OrientationAttendance),
 			Enrollments:           makeCountCell(totalCounts.Enrollments),
 			Spend:                 currencyCell(totalSpendAssigned),
@@ -698,6 +731,204 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			COLD:                  makeCountCell(totalCOLD),
 		},
 		Queries: CampaignQueries{
+			Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
+			Spend: spendDebug,
+		},
+		Range:          Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+		InterestLabels: interestLabels,
+	}, nil
+}
+
+func (r *Repo) BuildHeardFromPerformance(ctx context.Context, filters [][]string) (*HeardFromPerformance, error) {
+	dr, err := extractDateRange(filters)
+	if err != nil {
+		return nil, err
+	}
+
+	baseFilters := removeDateFilters(filters)
+	metaFilters := withMetaSourceFilter(baseFilters)
+
+	filterWithDates := applyDateRange(metaFilters, dr.Start, dr.End)
+	leadsQuery, leadArgs, err := buildQuery(filterWithDates, false)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.fetchRows(ctx, filterWithDates, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch distinct interest labels for UI (optional)
+	interestLabels, _ := r.uniqueInterestStrings(ctx)
+
+	spendMap, spendDebug, err := r.sumSpendByHeardFromWithDebug(ctx, dr.Start, dr.End)
+	if err != nil {
+		return nil, err
+	}
+
+	reinquiryByHeardFrom, err := r.countReinquiriesByHeardFrom(ctx, dr.Start, dr.End)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rows) == 0 {
+		return &HeardFromPerformance{
+			Rows: []HeardFromRow{},
+			Totals: HeardFromTotals{
+				Leads:                 makeCountCell(0),
+				Reinquiries:           makeCountCell(0),
+				OrientationAttendance: makeCountCell(0),
+				Enrollments:           makeCountCell(0),
+				Spend:                 currencyCell(0),
+				Revenue:               currencyCell(0),
+				SQL:                   makeCountCell(0),
+				HOT:                   makeCountCell(0),
+				WARM:                  makeCountCell(0),
+				COLD:                  makeCountCell(0),
+			},
+			Queries: HeardFromQueries{
+				Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
+				Spend: spendDebug,
+			},
+			Range:          Range{Start: formatDate(dr.Start), End: formatDate(dr.End)},
+			InterestLabels: interestLabels,
+		}, nil
+	}
+
+	type heardFromAggregate struct {
+		counts       summaryCounts
+		revenue      float64
+		sqlCount     int64
+		hotCount     int64
+		warmCount    int64
+		coldCount    int64
+		coldByReason map[string]int64
+	}
+
+	aggregates := make(map[heardFromKey]*heardFromAggregate)
+	var totalCounts summaryCounts
+	var totalRevenue float64
+	var totalSQL, totalHOT, totalWARM, totalCOLD int64
+	var totalReinquiries int64
+	for _, row := range rows {
+		name := normalizeString(row["primary_heard_from"])
+		if name == "" {
+			name = "Unknown"
+		}
+		id := toInt64(row["primary_heard_from_id"])
+		key := heardFromKey{ID: id, Name: name}
+
+		agg := aggregates[key]
+		if agg == nil {
+			agg = &heardFromAggregate{coldByReason: make(map[string]int64)}
+			aggregates[key] = agg
+		}
+		accumulateCounts(&agg.counts, row)
+		agg.revenue += toFloat(row["payment"])
+
+		if strings.EqualFold(normalizeString(row["sql_flag"]), "Yes") {
+			agg.sqlCount++
+			totalSQL++
+		}
+
+		interestStr := normalizeString(row["interest_string"])
+		if strings.EqualFold(interestStr, "Hot") {
+			agg.hotCount++
+			totalHOT++
+		} else if strings.EqualFold(interestStr, "Warm") {
+			agg.warmCount++
+			totalWARM++
+		} else if interestStr != "" {
+			agg.coldCount++
+			totalCOLD++
+			agg.coldByReason[interestStr] = agg.coldByReason[interestStr] + 1
+		}
+
+		accumulateCounts(&totalCounts, row)
+		totalRevenue += toFloat(row["payment"])
+	}
+
+	keys := make([]heardFromKey, 0, len(aggregates))
+	for key := range aggregates {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a := aggregates[keys[i]].counts.TotalLeads
+		b := aggregates[keys[j]].counts.TotalLeads
+		if a == b {
+			return keys[i].Name < keys[j].Name
+		}
+		return a > b
+	})
+
+	rowsOut := make([]HeardFromRow, 0, len(keys))
+	totalSpendAssigned := 0.0
+	for _, key := range keys {
+		agg := aggregates[key]
+		counts := agg.counts
+		spend := 0.0
+		if key.ID > 0 {
+			spend = spendMap[key.ID]
+		}
+		totalSpendAssigned += spend
+
+		attPercent := rate(counts.OrientationAttendance, counts.OrientationBookings)
+		orientEnrollPercent := rate(counts.Enrollments, counts.OrientationAttendance)
+
+		var breakdown []CountItem
+		if len(agg.coldByReason) > 0 {
+			breakdown = make([]CountItem, 0, len(agg.coldByReason))
+			for name, cnt := range agg.coldByReason {
+				breakdown = append(breakdown, CountItem{Name: name, Count: cnt})
+			}
+			sort.Slice(breakdown, func(i, j int) bool {
+				if breakdown[i].Count == breakdown[j].Count {
+					return breakdown[i].Name < breakdown[j].Name
+				}
+				return breakdown[i].Count > breakdown[j].Count
+			})
+		}
+
+		rowsOut = append(rowsOut, HeardFromRow{
+			HeardFrom:                key.Name,
+			Objective:                "Leads",
+			Leads:                    makeCountCell(counts.TotalLeads),
+			Reinquiries:              makeCountCell(reinquiryByHeardFrom[key]),
+			OrientationAttendance:    makeCountCell(counts.OrientationAttendance),
+			Enrollments:              makeCountCell(counts.Enrollments),
+			Spend:                    currencyCell(spend),
+			CPL:                      costCell(spend, counts.TotalLeads),
+			CPE:                      costCell(spend, counts.Enrollments),
+			OrientationAttPercent:    makePercentCell(attPercent),
+			OrientationEnrollPercent: makePercentCell(orientEnrollPercent),
+			Revenue:                  currencyCell(counts.Revenue),
+			ROAS:                     roasCell(counts.Revenue, spend),
+			SQL:                      makeCountCell(agg.sqlCount),
+			HOT:                      makeCountCell(agg.hotCount),
+			WARM:                     makeCountCell(agg.warmCount),
+			COLD:                     makeCountCell(agg.coldCount),
+			ColdBreakdown:            breakdown,
+		})
+
+		totalReinquiries += reinquiryByHeardFrom[key]
+	}
+
+	return &HeardFromPerformance{
+		Rows: rowsOut,
+		Totals: HeardFromTotals{
+			Leads:                 makeCountCell(totalCounts.TotalLeads),
+			Reinquiries:           makeCountCell(totalReinquiries),
+			OrientationAttendance: makeCountCell(totalCounts.OrientationAttendance),
+			Enrollments:           makeCountCell(totalCounts.Enrollments),
+			Spend:                 currencyCell(totalSpendAssigned),
+			Revenue:               currencyCell(totalRevenue),
+			SQL:                   makeCountCell(totalSQL),
+			HOT:                   makeCountCell(totalHOT),
+			WARM:                  makeCountCell(totalWARM),
+			COLD:                  makeCountCell(totalCOLD),
+		},
+		Queries: HeardFromQueries{
 			Leads: QueryDebug{SQL: leadsQuery, Params: stringifyArgs(leadArgs)},
 			Spend: spendDebug,
 		},
@@ -804,6 +1035,39 @@ func (r *Repo) sumSpendByHeardFrom(ctx context.Context, start, end time.Time) (m
 	}
 	return result, nil
 }
+
+func (r *Repo) sumSpendByHeardFromWithDebug(ctx context.Context, start, end time.Time) (map[int64]float64, QueryDebug, error) {
+	if r.db == nil {
+		return nil, QueryDebug{}, fmt.Errorf("leads repo: database not initialized")
+	}
+	params := []string{formatDate(start), formatDate(end)}
+	rows, err := r.db.QueryContext(ctx, heardFromSpendSQL, params[0], params[1])
+	if err != nil {
+		return nil, QueryDebug{}, fmt.Errorf("heard_from spend: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]float64)
+	for rows.Next() {
+		var id sql.NullInt64
+		var spend sql.NullFloat64
+		if err := rows.Scan(&id, &spend); err != nil {
+			return nil, QueryDebug{}, fmt.Errorf("heard_from spend scan: %w", err)
+		}
+		if !id.Valid {
+			continue
+		}
+		if spend.Valid {
+			result[id.Int64] = spend.Float64
+		} else {
+			result[id.Int64] = 0
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, QueryDebug{}, fmt.Errorf("heard_from spend rows: %w", err)
+	}
+	return result, QueryDebug{SQL: heardFromSpendSQL, Params: params}, nil
+}
 func (r *Repo) sumMetaSpendByCampaign(ctx context.Context, start, end time.Time) (map[string]float64, QueryDebug, error) {
 	if r.db == nil {
 		return nil, QueryDebug{}, fmt.Errorf("leads repo: database not initialized")
@@ -829,6 +1093,82 @@ func (r *Repo) sumMetaSpendByCampaign(ctx context.Context, start, end time.Time)
 		return nil, QueryDebug{}, fmt.Errorf("meta spend by campaign rows: %w", err)
 	}
 	return result, QueryDebug{SQL: campaignSpendSQL, Params: params}, nil
+}
+
+func (r *Repo) countReinquiriesByCampaign(ctx context.Context, start, end time.Time) (map[string]int64, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("leads repo: database not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, reinquiryCampaignSQL, formatDate(start), formatDate(end))
+	if err != nil {
+		return nil, fmt.Errorf("reinquiries by campaign: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int64)
+	for rows.Next() {
+		var name sql.NullString
+		var count sql.NullInt64
+		if err := rows.Scan(&name, &count); err != nil {
+			return nil, fmt.Errorf("reinquiries by campaign scan: %w", err)
+		}
+		key := normalizeString(name.String)
+		if key == "" {
+			key = "Unknown"
+		}
+		if count.Valid {
+			result[key] = count.Int64
+		} else {
+			result[key] = 0
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reinquiries by campaign rows: %w", err)
+	}
+	return result, nil
+}
+
+func (r *Repo) countReinquiriesByHeardFrom(ctx context.Context, start, end time.Time) (map[heardFromKey]int64, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("leads repo: database not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, reinquiryHeardFromSQL, formatDate(start), formatDate(end))
+	if err != nil {
+		return nil, fmt.Errorf("reinquiries by heard-from: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[heardFromKey]int64)
+	for rows.Next() {
+		var idRaw sql.NullString
+		var name sql.NullString
+		var count sql.NullInt64
+		if err := rows.Scan(&idRaw, &name, &count); err != nil {
+			return nil, fmt.Errorf("reinquiries by heard-from scan: %w", err)
+		}
+		idValue := int64(0)
+		if idRaw.Valid {
+			trimmed := strings.TrimSpace(idRaw.String)
+			if trimmed != "" {
+				if parsed, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+					idValue = parsed
+				}
+			}
+		}
+		key := heardFromKey{ID: idValue, Name: normalizeString(name.String)}
+		if key.Name == "" {
+			key.Name = "Unknown"
+		}
+		if count.Valid {
+			result[key] = count.Int64
+		} else {
+			result[key] = 0
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reinquiries by heard-from rows: %w", err)
+	}
+	return result, nil
 }
 
 // uniqueInterestStrings returns distinct interest_string values from the inquiry view.
@@ -922,7 +1262,6 @@ type dateRange struct {
 }
 
 func extractDateRange(filters [][]string) (dateRange, error) {
-	const key = "doi"
 	var (
 		start *time.Time
 		end   *time.Time
@@ -931,7 +1270,8 @@ func extractDateRange(filters [][]string) (dateRange, error) {
 		if len(f) < 3 {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(f[0]), key) {
+		field := strings.TrimSpace(f[0])
+		if strings.EqualFold(field, "doi_created") || strings.EqualFold(field, "doi") {
 			op := strings.TrimSpace(f[1])
 			val := strings.TrimSpace(f[2])
 			ts, err := parseDate(val)
@@ -947,10 +1287,10 @@ func extractDateRange(filters [][]string) (dateRange, error) {
 		}
 	}
 	if start == nil || end == nil {
-		return dateRange{}, errors.New("top summary requires doi >= and doi <= filters")
+		return dateRange{}, errors.New("top summary requires doi_created >= and doi_created <= filters")
 	}
 	if end.Before(*start) {
-		return dateRange{}, errors.New("doi end date precedes start date")
+		return dateRange{}, errors.New("doi_created end date precedes start date")
 	}
 	return dateRange{Start: truncateToDate(*start), End: truncateToDate(*end)}, nil
 }
@@ -971,7 +1311,8 @@ func removeDateFilters(filters [][]string) [][]string {
 		if len(f) < 3 {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(f[0]), "doi") {
+		field := strings.TrimSpace(f[0])
+		if strings.EqualFold(field, "doi_created") || strings.EqualFold(field, "doi") {
 			continue
 		}
 		cp := make([]string, len(f))
@@ -990,8 +1331,8 @@ func withMetaSourceFilter(filters [][]string) [][]string {
 
 func applyDateRange(filters [][]string, start, end time.Time) [][]string {
 	out := cloneFilters(filters)
-	out = append(out, []string{"doi", ">=", formatDate(start)})
-	out = append(out, []string{"doi", "<=", formatDate(end)})
+	out = append(out, []string{"doi_created", ">=", formatDateTimeStart(start)})
+	out = append(out, []string{"doi_created", "<=", formatDateTimeEnd(end)})
 	return out
 }
 
@@ -1064,6 +1405,15 @@ func truncateToDate(t time.Time) time.Time {
 
 func formatDate(t time.Time) string {
 	return truncateToDate(t).Format("2006-01-02")
+}
+
+func formatDateTimeStart(t time.Time) string {
+	return truncateToDate(t).Format("2006-01-02 15:04:05")
+}
+
+func formatDateTimeEnd(t time.Time) string {
+	endOfDay := truncateToDate(t).Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+	return endOfDay.Format("2006-01-02 15:04:05")
 }
 
 type summaryCounts struct {
@@ -1203,11 +1553,41 @@ type CampaignPerformance struct {
 	InterestLabels []string        `json:"interest_labels,omitempty"`
 }
 
+type HeardFromPerformance struct {
+	Rows           []HeardFromRow   `json:"rows"`
+	Totals         HeardFromTotals  `json:"totals"`
+	Queries        HeardFromQueries `json:"queries"`
+	Range          Range            `json:"range"`
+	InterestLabels []string         `json:"interest_labels,omitempty"`
+}
+
 type CampaignRow struct {
 	// Platform                 string      `json:"platform"`
 	CampaignName             string      `json:"campaign_name"`
 	Objective                string      `json:"objective"`
 	Leads                    SummaryCell `json:"leads"`
+	Reinquiries              SummaryCell `json:"reinquiries"`
+	OrientationAttendance    SummaryCell `json:"orientation_attendance"`
+	Enrollments              SummaryCell `json:"enrollments"`
+	Spend                    SummaryCell `json:"spend"`
+	CPL                      SummaryCell `json:"cost_per_lead"`
+	CPE                      SummaryCell `json:"cost_per_enrollment"`
+	OrientationAttPercent    SummaryCell `json:"orientation_att_percent"`
+	OrientationEnrollPercent SummaryCell `json:"orientation_enroll_percent"`
+	Revenue                  SummaryCell `json:"revenue"`
+	ROAS                     SummaryCell `json:"roas"`
+	SQL                      SummaryCell `json:"sql"`
+	HOT                      SummaryCell `json:"hot"`
+	WARM                     SummaryCell `json:"warm"`
+	COLD                     SummaryCell `json:"cold"`
+	ColdBreakdown            []CountItem `json:"cold_breakdown,omitempty"`
+}
+
+type HeardFromRow struct {
+	HeardFrom                string      `json:"heard_from"`
+	Objective                string      `json:"objective"`
+	Leads                    SummaryCell `json:"leads"`
+	Reinquiries              SummaryCell `json:"reinquiries"`
 	OrientationAttendance    SummaryCell `json:"orientation_attendance"`
 	Enrollments              SummaryCell `json:"enrollments"`
 	Spend                    SummaryCell `json:"spend"`
@@ -1232,6 +1612,20 @@ type CountItem struct {
 
 type CampaignTotals struct {
 	Leads                 SummaryCell `json:"leads"`
+	Reinquiries           SummaryCell `json:"reinquiries"`
+	OrientationAttendance SummaryCell `json:"orientation_attendance"`
+	Enrollments           SummaryCell `json:"enrollments"`
+	Spend                 SummaryCell `json:"spend"`
+	Revenue               SummaryCell `json:"revenue"`
+	SQL                   SummaryCell `json:"sql"`
+	HOT                   SummaryCell `json:"hot"`
+	WARM                  SummaryCell `json:"warm"`
+	COLD                  SummaryCell `json:"cold"`
+}
+
+type HeardFromTotals struct {
+	Leads                 SummaryCell `json:"leads"`
+	Reinquiries           SummaryCell `json:"reinquiries"`
 	OrientationAttendance SummaryCell `json:"orientation_attendance"`
 	Enrollments           SummaryCell `json:"enrollments"`
 	Spend                 SummaryCell `json:"spend"`
@@ -1243,6 +1637,11 @@ type CampaignTotals struct {
 }
 
 type CampaignQueries struct {
+	Leads QueryDebug `json:"leads"`
+	Spend QueryDebug `json:"spend"`
+}
+
+type HeardFromQueries struct {
 	Leads QueryDebug `json:"leads"`
 	Spend QueryDebug `json:"spend"`
 }
