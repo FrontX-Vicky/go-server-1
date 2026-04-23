@@ -17,11 +17,18 @@ type Observability struct {
 	Prometheus bool
 }
 
+type PrismConfig struct {
+	BaseURL   string
+	TimeoutMS int
+	APIKey    string
+}
+
 type Config struct {
 	AppEnv  string
 	Server  ServerConfig
 	Obs     Observability
 	APIKeys APIKeys
+	Prism   PrismConfig
 }
 
 type DBConfig struct {
@@ -48,6 +55,17 @@ func getenv(k, def string) string {
 	return def
 }
 
+func getenvInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		var parsed int
+		_, err := fmt.Sscanf(v, "%d", &parsed)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return def
+}
+
 func Load() Config {
 	return Config{
 		AppEnv: getenv("APP_ENV", "dev"),
@@ -62,6 +80,11 @@ func Load() Config {
 		},
 		APIKeys: APIKeys{
 			Dynamic: getenv("DYNAMIC_API_KEY", ""),
+		},
+		Prism: PrismConfig{
+			BaseURL:   getenv("PRISM_API_BASE_URL", ""),
+			TimeoutMS: getenvInt("PRISM_API_TIMEOUT_MS", 5000),
+			APIKey:    getenv("PRISM_API_KEY", ""),
 		},
 	}
 }
