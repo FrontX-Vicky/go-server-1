@@ -80,6 +80,7 @@ func Load() Config {
 		},
 		APIKeys: APIKeys{
 			Dynamic: getenv("DYNAMIC_API_KEY", ""),
+			Open:    getenv("OPEN_API_KEY", ""),
 		},
 		Prism: PrismConfig{
 			BaseURL:   getenv("PRISM_API_BASE_URL", ""),
@@ -91,6 +92,7 @@ func Load() Config {
 
 type APIKeys struct {
 	Dynamic string
+	Open    string
 }
 
 // DB_NAMES=DB1,DB2

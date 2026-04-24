@@ -9,6 +9,7 @@ import (
 	"server_1/internal/modules/dynamicapi"
 	"server_1/internal/modules/export"
 	"server_1/internal/modules/leads"
+	"server_1/internal/modules/openapi"
 	// "server_1/internal/modules/test_items"
 	"server_1/internal/modules/reports"
 	"server_1/internal/modules/schema"
@@ -29,6 +30,7 @@ func Build(cfg config.Config) *gin.Engine {
 	dynamicapi.MountRoutes(v1, cfg.APIKeys.Dynamic, prismClient)
 	export.MountRoutes(v1, prismClient)
 	leads.MountRoutes(v1, prismClient)
+	openapi.MountRoutes(v1, cfg.APIKeys.Open)
 	reports.MountRoutes(v1, prismClient)
 	schema.MountRoutes(v1, prismClient)
 	return r

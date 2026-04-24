@@ -1,0 +1,246 @@
+package openapi
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+	"time"
+
+	"server_1/internal/core/db"
+)
+
+type Repo struct {
+	db *sql.DB
+}
+
+func NewRepo() *Repo {
+	return &Repo{db: db.DB("DB1")}
+}
+
+const inquiryDemoFollowupSQL = `
+SELECT
+	i.contact_id AS contact_id,
+	CONCAT(c.fname, ' ', c.lname, ' ', c.mname) AS fullname,
+	c.dob,
+	f.city AS city,
+	v.venue,
+	f.country AS country,
+	CONCAT(ce.fname, ' ', ce.lname) AS counsellor_name,
+	b.branch,
+	b.type AS branch_type,
+	CASE
+		WHEN cat.master_category_id = 1 THEN 'Online Program'
+		WHEN cat.master_category_id = 2 THEN 'Offline Program'
+		ELSE ''
+	END AS program_type,
+	i.created_at AS doi_created,
+	i.allocation_date,
+	f.interest_string AS interest_string,
+	d.start_date AS demo_date,
+	dfr.demo_attended,
+	COALESCE(fp.first_payment_date, NULL) AS date_of_conversion,
+	CASE
+		WHEN m.id IS NULL THEN 0
+		ELSE 1
+	END AS inquiry_converted,
+	f.lost_reason AS lost_reason,
+	f.comment AS COMMENT,
+	s.source,
+	ps.source AS primary_source,
+	cp.campaign_name,
+	h.heard_from AS heard_from,
+	ph.heard_from AS primary_heard_from,
+	i.utm AS utm,
+	CASE
+		WHEN f.interest_string IN ('Hot', 'Warm') THEN 'Yes'
+		WHEN (
+			CASE
+				WHEN m.id IS NULL THEN 0
+				ELSE 1
+			END
+		) = 1 THEN 'Yes'
+		WHEN f.interest_string = 'Cold'
+		AND f.lost_reason IN (
+			'Expensive',
+			'No Device for Online Program',
+			'Requested for a Trial Class',
+			'Location Proximity',
+			'No Centre in the City',
+			'Batch Unavailability/Batches Maxed Out'
+		) THEN 'Yes'
+		ELSE 'No'
+	END AS ` + "`sql`" + `,
+	COALESCE(fp.first_payment_amount, 0) AS first_payment_amount,
+	COALESCE(fp.first_payment_date, NULL) AS first_payment_date,
+	fi.invoice_id AS id,
+	fd.duration
+FROM
+	inquiry i
+	LEFT JOIN contact c ON i.contact_id = c.id
+	AND i.park = 0
+	AND c.park = 0
+	LEFT JOIN (
+		SELECT
+			f1.*
+		FROM
+			followup f1
+			JOIN (
+				SELECT
+					contact_id,
+					MAX(id) AS max_id
+				FROM
+					followup
+				WHERE
+					park = 0
+					AND master_id <> 0
+				GROUP BY
+					contact_id
+			) f2 ON f2.max_id = f1.id
+	) f ON f.contact_id = i.contact_id
+	LEFT JOIN venue v ON v.id = f.venue_id
+	LEFT JOIN employee e ON e.id = f.employee_id
+	LEFT JOIN contact ce ON ce.id = e.contact_id
+	LEFT JOIN branch b ON b.id = i.bid
+	LEFT JOIN (
+		SELECT
+			mobile,
+			MAX(demo_id) AS demo_id,
+			MAX(demo_attended) AS demo_attended
+		FROM
+			demo_form_response
+		GROUP BY
+			mobile
+	) dfr ON dfr.mobile = c.mobile
+	LEFT JOIN demo d ON d.id = dfr.demo_id
+	LEFT JOIN member m ON m.contact_id = i.contact_id
+	LEFT JOIN inquiry_source s ON s.id = i.source
+	LEFT JOIN inquiry_source ps ON ps.id = i.primary_source
+	LEFT JOIN heard_from h ON h.id = i.heard_from
+	LEFT JOIN heard_from ph ON ph.id = i.primary_heard_from
+	LEFT JOIN campaign cp ON cp.campaign_id = h.campaign_id
+	LEFT JOIN inquiry_category ic ON ic.inquiry_id = i.id
+	LEFT JOIN category cat ON cat.id = ic.category_id
+	LEFT JOIN (
+		SELECT
+			i1.contact_id,
+			i1.id AS invoice_id
+		FROM
+			invoice i1
+			LEFT JOIN invoice i2 ON i2.contact_id = i1.contact_id
+			AND i2.park = 0
+			AND (
+				i2.date < i1.date
+				OR (
+					i2.date = i1.date
+					AND i2.id < i1.id
+				)
+			)
+		WHERE
+			i1.park = 0
+			AND i2.id IS NULL
+	) fi ON fi.contact_id = i.contact_id
+	LEFT JOIN (
+		SELECT
+			p.invoice_id,
+			SUM(p.amount) AS first_payment_amount,
+			MIN(p.date) AS first_payment_date
+		FROM
+			payment p
+		WHERE
+			p.park = 0
+		GROUP BY
+			p.invoice_id
+	) fp ON fp.invoice_id = fi.invoice_id
+	LEFT JOIN (
+		SELECT
+			ii.invoice_id,
+			CASE
+				WHEN s.duration = 1
+				AND s.duration_type = 'Y' THEN '12M'
+				WHEN s.duration = 2
+				AND s.duration_type = 'Y' THEN '24M'
+				ELSE CONCAT(s.duration, s.duration_type)
+			END AS duration
+		FROM
+			invoice_item ii
+			JOIN (
+				SELECT
+					invoice_id,
+					MIN(id) AS min_item_id
+				FROM
+					invoice_item
+				GROUP BY
+					invoice_id
+			) pick ON pick.invoice_id = ii.invoice_id
+			AND pick.min_item_id = ii.id
+			JOIN service s ON s.id = ii.service_id
+	) fd ON fd.invoice_id = fi.invoice_id
+WHERE
+	i.created_at >= '2024-01-01'
+	AND i.park = 0
+	AND c.park = 0`
+
+func (r *Repo) InquiryDemoFollowup(ctx context.Context) ([]map[string]any, error) {
+	rows, err := r.db.QueryContext(ctx, inquiryDemoFollowupSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanRows(rows)
+}
+
+func scanRows(rows *sql.Rows) ([]map[string]any, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]any, 0)
+	for rows.Next() {
+		values := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+
+		if err := rows.Scan(pointers...); err != nil {
+			return nil, err
+		}
+
+		row := make(map[string]any, len(columns))
+		for i, column := range columns {
+			row[column] = normalizeSQLValue(values[i], columnTypes[i].DatabaseTypeName())
+		}
+		result = append(result, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func normalizeSQLValue(value any, databaseType string) any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case []byte:
+		return string(typed)
+	case time.Time:
+		if typed.IsZero() {
+			return nil
+		}
+		if strings.EqualFold(databaseType, "DATE") {
+			return typed.Format("2006-01-02")
+		}
+		return typed.Format("2006-01-02 15:04:05")
+	default:
+		return typed
+	}
+}
