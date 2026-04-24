@@ -181,7 +181,14 @@ SELECT
 					WHERE
 						i.created_at >= '2024-01-01'
 						AND i.park = 0
-						AND c.park = 0`
+						AND c.park = 0 AND (i.bid IN(
+    SELECT
+        id
+    FROM
+        pf_TickleRight_9210.branch
+    WHERE
+        counsellors_incentives = 1 AND park = 0
+) OR b.type = 'COCO')`
 
 func (r *Repo) InquiryDemoFollowup(ctx context.Context) ([]map[string]any, error) {
 	rows, err := r.db.QueryContext(ctx, inquiryDemoFollowupSQL)
