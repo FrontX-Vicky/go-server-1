@@ -11,16 +11,25 @@ import (
 )
 
 var supportedReportIDs = map[int64]struct{}{
-	158: {}, // IM Online
-	307: {}, // IM Offline Venue
-	209: {}, // IM Combine
-	184: {}, // IM Offline Branch
-	367: {}, // IM Report
-	186: {}, // OM Online
-	309: {}, // OM Offline Venue
-	211: {}, // OM Combine
-	185: {}, // OM Offline Branch
-	366: {}, // OM Report
+	158: {}, // v1 Online
+	307: {}, // v1 Offline Venue
+	209: {}, // v1 Combine
+	184: {}, // v1 Offline Branch
+	367: {}, // v1 Report
+	186: {}, // v2 Online
+	309: {}, // v2 Offline Venue
+	211: {}, // v2 Combine
+	185: {}, // v2 Offline Branch
+	366: {}, // v2 Report
+}
+
+// v2 report IDs run against DB2
+var v2ReportIDs = map[int64]struct{}{
+	186: {},
+	309: {},
+	211: {},
+	185: {},
+	366: {},
 }
 
 type Repo struct {
@@ -112,6 +121,10 @@ func (r *Repo) buildReportOptions(req FranchiseeReportRequest) map[string]any {
 		"groupby":    req.GroupBy,
 	}
 
+	if _, isV2 := v2ReportIDs[req.ReportID]; isV2 {
+		opts["db_name"] = "DB2"
+	}
+
 	if req.Limit > 0 {
 		opts["limit"] = strconv.Itoa(req.Limit)
 	}
@@ -133,7 +146,14 @@ func (r *Repo) buildReportOptions(req FranchiseeReportRequest) map[string]any {
 		}
 		if len(parts) > 0 {
 			opts["orderby"] = parts
+		} else {
+			// All columns were blank; disable fallback to avoid invalid report_order entries
+			opts["disable_order"] = true
 		}
+	} else {
+		// No explicit order; disable the report_order fallback which may reference
+		// columns not accessible at the ORDER BY level (e.g. subquery aliases).
+		opts["disable_order"] = true
 	}
 
 	return opts

@@ -356,6 +356,7 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 	groupby, _ := opts["groupby"].(string)
 	limit, _ := opts["limit"].(string)
 	offset, _ := opts["offset"].(string)
+	disableOrder, _ := opts["disable_order"].(bool)
 	// orderby: []map[string]string or string
 	orderby, _ := opts["orderby"].([]map[string]string)
 
@@ -450,7 +451,9 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 
 	// ORDER BY
 	orderByStr := ""
-	if len(orderby) > 0 {
+	if disableOrder {
+		// caller explicitly disabled ordering
+	} else if len(orderby) > 0 {
 		parts := []string{}
 		for _, ord := range orderby {
 			for k, v := range ord {
@@ -460,7 +463,7 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 		parts = append(parts, "id DESC")
 		orderByStr = strings.Join(parts, ", ")
 	} else {
-		// system order by
+		// system order by (fallback from report_order table)
 		sysParts := []string{}
 		sysRows, err := r.db1.QueryContext(ctx, `SELECT col, order_by FROM report_order WHERE report_id = ?`, id)
 		if err == nil {
@@ -529,7 +532,15 @@ func (r *Repo) RunReportQuery(ctx context.Context, id int64, opts map[string]any
 	if err != nil {
 		return nil, "", err
 	}
-	rows, err := r.db1.QueryContext(ctx, query)
+	dbName, _ := opts["db_name"].(string)
+	rows, err := r.choose(dbName).QueryContext(ctx, query)
+	if err != nil && strings.EqualFold(strings.TrimSpace(dbName), "DB2") {
+		// Keep DB2 as default for v2, but retry on DB1 for report queries
+		// whose underlying table does not exist in central DB.
+		if strings.Contains(err.Error(), "Error 1146") || strings.Contains(strings.ToLower(err.Error()), "doesn't exist") {
+			rows, err = r.db1.QueryContext(ctx, query)
+		}
+	}
 	if err != nil {
 		return nil, query, err
 	}
