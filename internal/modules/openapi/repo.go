@@ -69,11 +69,12 @@ SELECT
 								'Batch Unavailability/Batches Maxed Out'
 							) THEN 'Yes'
 							ELSE 'No'
-						END AS `sql`,
-						COALESCE(fp.first_payment_amount, 0) AS first_payment_amount,
-						COALESCE(fp.first_payment_date, NULL) AS first_payment_date,
-						fi.invoice_id AS id,
-						fd.duration
+							END AS ` + "`sql`" + `,
+							COALESCE(fp.first_payment_amount, 0) AS first_payment_amount,
+							COALESCE(fp.first_payment_date, NULL) AS first_payment_date,
+							COALESCE(fp.pay_mode, NULL) AS pay_mode,
+							fi.invoice_id AS id,
+							fd.duration
 					FROM
 						pf_TickleRight_9210.inquiry i
 						LEFT JOIN pf_TickleRight_9210.contact c ON i.contact_id = c.id
@@ -142,17 +143,28 @@ SELECT
 								i1.park = 0
 								AND i2.id IS NULL
 						) fi ON fi.contact_id = i.contact_id
-						/* sum of payments for that invoice */
-						LEFT JOIN (
-							SELECT
-								p.invoice_id,
-								SUM(p.amount) AS first_payment_amount,
-								MIN(p.date) AS first_payment_date
-							FROM
-								pf_TickleRight_9210.payment p WHERE p.park = 0
-							GROUP BY
-								p.invoice_id
-						) fp ON fp.invoice_id = fi.invoice_id
+							/* first non-parked payment for that invoice (by date, then id) */
+							LEFT JOIN (
+								SELECT
+									p1.invoice_id,
+									p1.amount AS first_payment_amount,
+									p1.date AS first_payment_date,
+									p1.pay_mode AS pay_mode
+								FROM
+									pf_TickleRight_9210.payment p1
+									LEFT JOIN pf_TickleRight_9210.payment p2 ON p2.invoice_id = p1.invoice_id
+									AND p2.park = 0
+									AND (
+										p2.date < p1.date
+										OR (
+											p2.date = p1.date
+											AND p2.id < p1.id
+										)
+									)
+								WHERE
+									p1.park = 0
+									AND p2.id IS NULL
+							) fp ON fp.invoice_id = fi.invoice_id
 						/* duration from a single, deterministic invoice item (the earliest item per invoice) */
 						LEFT JOIN (
 							SELECT
