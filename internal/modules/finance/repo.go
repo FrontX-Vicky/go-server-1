@@ -62,15 +62,6 @@ func (r *Repo) GetFranchiseeReport(ctx context.Context, req FranchiseeReportRequ
 		return nil, query, err
 	}
 
-	// For a clean API, compute overall totals and count on the same query without paging.
-	unpagedReq := req
-	unpagedReq.Limit = 0
-	unpagedReq.Offset = 0
-	allRows, _, err := r.reportsRepo.RunReportQuery(ctx, req.ReportID, r.buildReportOptions(unpagedReq))
-	if err != nil {
-		return nil, query, err
-	}
-
 	columns := make([]Column, 0, len(meta.Columns))
 	for _, col := range meta.Columns {
 		if strings.TrimSpace(col.ColumnName) == "" || col.Position == 0 {
@@ -85,7 +76,13 @@ func (r *Repo) GetFranchiseeReport(ctx context.Context, req FranchiseeReportRequ
 
 	totalColumn := strings.TrimSpace(meta.Total)
 	pageTotal := sumColumn(rows, totalColumn)
-	overallTotal := sumColumn(allRows, totalColumn)
+	overallTotal := pageTotal
+	totalCount := len(rows)
+
+	if c, t, _, aggErr := r.reportsRepo.RunReportAggregates(ctx, req.ReportID, opts, totalColumn); aggErr == nil {
+		totalCount = c
+		overallTotal = t
+	}
 
 	resp := &FranchiseeReportResponse{
 		ReportID:  req.ReportID,
@@ -106,7 +103,7 @@ func (r *Repo) GetFranchiseeReport(ctx context.Context, req FranchiseeReportRequ
 			Limit:      req.Limit,
 			Offset:     req.Offset,
 			PageCount:  len(rows),
-			TotalCount: len(allRows),
+			TotalCount: totalCount,
 		},
 		GeneratedAt: time.Now().UTC(),
 	}
