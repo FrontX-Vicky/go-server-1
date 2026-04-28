@@ -50,6 +50,13 @@ func (ctl *Controller) FranchiseeReport(c *gin.Context) {
 		return
 	}
 
+	if !req.ForceRefresh {
+		if cachedResp, ok := getCachedFranchiseeReport(c.Request.Context(), req); ok {
+			httpx.OK(c, gin.H{"data": cachedResp})
+			return
+		}
+	}
+
 	resp, query, err := ctl.Repo.GetFranchiseeReport(c.Request.Context(), req)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -59,6 +66,8 @@ func (ctl *Controller) FranchiseeReport(c *gin.Context) {
 		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error(), "query": query})
 		return
 	}
+
+	setCachedFranchiseeReport(c.Request.Context(), req, resp)
 
 	httpx.OK(c, gin.H{"data": resp})
 }

@@ -8,6 +8,19 @@ import (
 
 func MountRoutes(v1 *gin.RouterGroup, checker prism.Checker) {
 	g := v1.Group("/finance")
+
 	ctl := &Controller{Repo: NewRepo()}
 	g.POST("/franchisee-report", prism.RequirePrism(checker, "report:read"), ctl.FranchiseeReport)
+
+	inv := &FranchiseInvoiceController{Repo: NewFranchiseInvoiceRepo()}
+	invG := g.Group("/franchise-invoice", prism.RequirePrism(checker, "report:read"))
+	invG.GET("/init", inv.GetFranchiseInvoiceInit)
+	invG.POST("", inv.CreateFranchiseInvoice)
+	invG.PUT("", inv.UpdateFranchiseInvoice)
+	invG.DELETE("", inv.DeleteFranchiseInvoice)
+	invG.GET("/sub-invoices", inv.ListSubInvoices)
+	invG.POST("/sub-invoice", inv.CreateSubInvoice)
+	invG.DELETE("/sub-invoice", inv.DeleteSubInvoice)
+	invG.POST("/sales-invoice", inv.CreateSalesInvoice)
+	invG.GET("/annexure", inv.GetMemberTransferAnnexure)
 }
