@@ -149,31 +149,178 @@ func (r *FranchiseInvoiceRepo) DeleteFranchiseInvoice(ctx context.Context, invoi
 
 // CreateSubInvoice inserts a sub-invoice row linked to the parent invoice (DB1).
 func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateSubInvoiceRequest) (int64, error) {
+	// Load parent invoice fields required by legacy franchise_invoice_sub schema.
+	parentRow := r.db1.QueryRowContext(ctx,
+		`SELECT COALESCE(branch,''), COALESCE(owner_name_id,0), COALESCE(month_year,''),
+		        COALESCE(start_date,''), COALESCE(end_date,''),
+		        COALESCE(total_sale,0), COALESCE(royality,0),
+		        COALESCE(cgst,0), COALESCE(sgst,0), COALESCE(igst,0),
+		        COALESCE(calculated_igst,0), COALESCE(grant_total,0),
+		        COALESCE(other_items,''), COALESCE(proforma,0),
+		        COALESCE(invoice_date,'0000-00-00')
+		 FROM franchise_invoice
+		 WHERE id = ? AND park = 0`,
+		req.ParentInvoiceID,
+	)
+
+	var (
+		branch         string
+		ownerNameID    int64
+		monthYear      string
+		startDate      string
+		endDate        string
+		parentTotal    float64
+		parentRoyality float64
+		parentCGST     float64
+		parentSGST     float64
+		parentIGST     float64
+		parentCalcIGST float64
+		parentGrant    float64
+		parentItems    string
+		parentProforma int64
+		parentInvDate  string
+	)
+	if err := parentRow.Scan(
+		&branch, &ownerNameID, &monthYear,
+		&startDate, &endDate,
+		&parentTotal, &parentRoyality,
+		&parentCGST, &parentSGST, &parentIGST,
+		&parentCalcIGST, &parentGrant,
+		&parentItems, &parentProforma,
+		&parentInvDate,
+	); err != nil {
+		return 0, fmt.Errorf("parent invoice %d not found: %w", req.ParentInvoiceID, err)
+	}
+
+	invoiceDate := req.InvoiceDate
+	if strings.TrimSpace(invoiceDate) == "" || invoiceDate == "0000-00-00" {
+		invoiceDate = parentInvDate
+	}
+
+	otherItems := req.OtherItems
+	if strings.TrimSpace(otherItems) == "" {
+		otherItems = parentItems
+	}
+
+	totalSale := req.TotalSale
+	if totalSale == 0 {
+		totalSale = parentTotal
+	}
+	royality := req.Royality
+	if royality == 0 {
+		royality = parentRoyality
+	}
+	cgst := req.CGST
+	if cgst == 0 {
+		cgst = parentCGST
+	}
+	sgst := req.SGST
+	if sgst == 0 {
+		sgst = parentSGST
+	}
+	igst := req.IGST
+	if igst == 0 {
+		igst = parentIGST
+	}
+	calcIGST := req.CalculatedIGST
+	if calcIGST == 0 {
+		calcIGST = parentCalcIGST
+	}
+	grantTotal := req.GrantTotal
+	if grantTotal == 0 {
+		grantTotal = parentGrant
+	}
+	proforma := req.Proforma
+	if strings.TrimSpace(proforma) == "" {
+		proforma = fmt.Sprintf("%d", parentProforma)
+	}
+
+	itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount := extractSubInvoiceItemSnapshot(otherItems)
+
 	res, err := r.db1.ExecContext(ctx,
-		`INSERT INTO franchise_im_invoice
-		 (parent_invoice_id, invoice, invoice_date, proforma, total_sale, royality,
-		  cgst, sgst, igst, calculated_igst, grant_total, other_items, park, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,NOW())`,
-		req.ParentInvoiceID, req.Invoice, req.InvoiceDate, req.Proforma,
-		req.TotalSale, req.Royality, req.CGST, req.SGST, req.IGST,
-		req.CalculatedIGST, req.GrantTotal, req.OtherItems,
+		`INSERT INTO franchise_invoice_sub
+		 (parent_invoice_id, invoice, branch, owner_name_id, month_year, start_date, end_date,
+		  invoice_date, total_sale, royality, cgst, sgst, igst, calculated_igst,
+		  item_name, item_hsn, item_cgst_rate, item_sgst_rate, item_igst_rate, item_gst_amount,
+		  other_items, grant_total, proforma, created_by, created_at, modified_by, modified_at, park)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW(),0,NOW(),0)`,
+		req.ParentInvoiceID, req.Invoice, branch, ownerNameID, monthYear, startDate, endDate,
+		invoiceDate, totalSale, royality, cgst, sgst, igst, calcIGST,
+		itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount,
+		otherItems, grantTotal, proforma,
 	)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
+
 // ListSubInvoices returns sub-invoices for a parent invoice (DB1).
-// NOTE: Disabled - franchise_im_invoice table lacks parent_invoice_id column.
-// TODO: Add database migration to add parent_invoice_id, then re-enable.
 func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoiceID int64) ([]SubInvoice, error) {
-	return []SubInvoice{}, nil
+	rows, err := r.db1.QueryContext(ctx,
+		`SELECT id, parent_invoice_id,
+		        COALESCE(invoice,''), COALESCE(invoice_date,'0000-00-00'),
+		        COALESCE(proforma,'0'), COALESCE(total_sale,0),
+		        COALESCE(royality,0), COALESCE(cgst,0), COALESCE(sgst,0),
+		        COALESCE(igst,0), COALESCE(grant_total,0), COALESCE(other_items,''),
+		        COALESCE(sales_invoice_id,0), COALESCE(sales_invoice_no,''),
+		        COALESCE(sales_invoice_status,''), COALESCE(created_at,''),
+		        COALESCE(item_name,''), COALESCE(item_hsn,''), COALESCE(item_gst_amount,0)
+		 FROM franchise_invoice_sub
+		 WHERE parent_invoice_id = ? AND park = 0
+		 ORDER BY id DESC`,
+		parentInvoiceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := []SubInvoice{}
+	for rows.Next() {
+		var (
+			s            SubInvoice
+			itemName     string
+			itemHSN      string
+			itemGSTValue float64
+		)
+		if err := rows.Scan(
+			&s.ID, &s.ParentInvoiceID,
+			&s.Invoice, &s.InvoiceDate,
+			&s.Proforma, &s.TotalSale,
+			&s.Royality, &s.CGST, &s.SGST,
+			&s.IGST, &s.GrantTotal, &s.OtherItems,
+			&s.SalesInvoiceID, &s.SalesInvoiceNo,
+			&s.SalesInvoiceStatus, &s.CreatedAt,
+			&itemName, &itemHSN, &itemGSTValue,
+		); err != nil {
+			return nil, err
+		}
+
+		s.ItemLabel = itemName
+		if strings.TrimSpace(s.ItemLabel) == "" {
+			meta := extractSubInvoiceItemMeta(s.OtherItems)
+			s.ItemLabel = meta[0]
+			s.ItemHSN = meta[1]
+			s.ItemGSTAmount = meta[2]
+		} else {
+			s.ItemHSN = itemHSN
+			if strings.TrimSpace(s.ItemHSN) == "" {
+				s.ItemHSN = "-"
+			}
+			s.ItemGSTAmount = fmt.Sprintf("%.2f", itemGSTValue)
+		}
+
+		list = append(list, s)
+	}
+
+	return list, rows.Err()
 }
 
 // DeleteSubInvoice soft-deletes a sub-invoice (park=1) in DB1.
 func (r *FranchiseInvoiceRepo) DeleteSubInvoice(ctx context.Context, subInvoiceID int64) error {
 	_, err := r.db1.ExecContext(ctx,
-		`UPDATE franchise_im_invoice SET park = 1 WHERE id = ? AND park = 0`,
+		`UPDATE franchise_invoice_sub SET park = 1 WHERE id = ? AND park = 0`,
 		subInvoiceID,
 	)
 	return err
@@ -187,7 +334,7 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		`SELECT id, COALESCE(invoice,''), COALESCE(invoice_date,'0000-00-00'),
 		        COALESCE(royality,0), COALESCE(cgst,0), COALESCE(sgst,0),
 		        COALESCE(igst,0), COALESCE(grant_total,0), COALESCE(other_items,'')
-		 FROM franchise_im_invoice WHERE id = ? AND park = 0`,
+		 FROM franchise_invoice_sub WHERE id = ? AND park = 0`,
 		subInvoiceID,
 	)
 	var (
@@ -223,14 +370,51 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 
 	// Link back to the sub-invoice
 	if _, err := r.db1.ExecContext(ctx,
-		`UPDATE franchise_im_invoice SET sales_invoice_id = ?, sales_invoice_no = ?
+		`UPDATE franchise_invoice_sub SET sales_invoice_id = ?, sales_invoice_no = ?, sales_invoice_status = ?
 		 WHERE id = ?`,
-		salesInvoiceID, invoice, id,
+		salesInvoiceID, invoice, "created", id,
 	); err != nil {
 		return salesInvoiceID, err
 	}
 
 	return salesInvoiceID, nil
+}
+
+func extractSubInvoiceItemSnapshot(raw string) (itemName, itemHSN string, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount float64) {
+	meta := extractSubInvoiceItemMeta(raw)
+	itemName = strings.TrimSpace(meta[0])
+	if itemName == "-" {
+		itemName = ""
+	}
+	itemHSN = strings.TrimSpace(meta[1])
+	if itemHSN == "-" {
+		itemHSN = ""
+	}
+
+	var parsed map[string]map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		if gst, err2 := strconv.ParseFloat(meta[2], 64); err2 == nil {
+			itemGSTAmount = gst
+		}
+		return
+	}
+
+	for _, item := range parsed {
+		amount := toFloat(item["amount"])
+		itemCGSTRate = toFloat(item["cgst"])
+		itemSGSTRate = toFloat(item["sgst"])
+		itemIGSTRate = toFloat(item["igst"])
+		itemGSTAmount = amount*itemCGSTRate/100 + amount*itemSGSTRate/100 + amount*itemIGSTRate/100
+		break
+	}
+
+	if itemGSTAmount == 0 {
+		if gst, err := strconv.ParseFloat(meta[2], 64); err == nil {
+			itemGSTAmount = gst
+		}
+	}
+
+	return
 }
 
 // GetMemberTransferAnnexure returns transfer annexure data from DB2.

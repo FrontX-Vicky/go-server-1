@@ -1,122 +1,122 @@
 package finance
 
 import (
-\t"context"
-\t"crypto/sha1"
-\t"encoding/hex"
-\t"encoding/json"
-\t"fmt"
-\t"os"
-\t"strconv"
-\t"strings"
-\t"sync"
-\t"time"
+	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
-\t"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 )
 
 const franchiseeReportCacheTTL = time.Hour
 
 var (
-\treportCacheOnce   sync.Once
-\treportCacheClient *redis.Client
+	reportCacheOnce   sync.Once
+	reportCacheClient *redis.Client
 )
 
 func getReportCacheClient() *redis.Client {
-\treportCacheOnce.Do(func() {
-\t\taddr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
-\t\tif addr == "" {
-\t\t\taddr = "127.0.0.1:6379"
-\t\t}
+	reportCacheOnce.Do(func() {
+		addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+		if addr == "" {
+			addr = "127.0.0.1:6379"
+		}
 
-\t\tdb := 0
-\t\tif raw := strings.TrimSpace(os.Getenv("REDIS_DB")); raw != "" {
-\t\t\tif parsed, err := strconv.Atoi(raw); err == nil {
-\t\t\t\tdb = parsed
-\t\t\t}
-\t\t}
+		db := 0
+		if raw := strings.TrimSpace(os.Getenv("REDIS_DB")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil {
+				db = parsed
+			}
+		}
 
-\t\treportCacheClient = redis.NewClient(&redis.Options{
-\t\t\tAddr:     addr,
-\t\t\tPassword: os.Getenv("REDIS_PASSWORD"),
-\t\t\tDB:       db,
-\t\t})
-\t})
+		reportCacheClient = redis.NewClient(&redis.Options{
+			Addr:     addr,
+			Password: os.Getenv("REDIS_PASSWORD"),
+			DB:       db,
+		})
+	})
 
-\treturn reportCacheClient
+	return reportCacheClient
 }
 
 func franchiseeReportCacheKey(req FranchiseeReportRequest) string {
-\traw := fmt.Sprintf(
-\t\t"report_id=%d|start=%s|end=%s|group_by=%s|limit=%d|offset=%d|order=%s",
-\t\treq.ReportID,
-\t\tstrings.TrimSpace(req.StartDate),
-\t\tstrings.TrimSpace(req.EndDate),
-\t\tstrings.TrimSpace(req.GroupBy),
-\t\treq.Limit,
-\t\treq.Offset,
-\t\tcanonicalOrderBy(req.OrderBy),
-\t)
-\thash := sha1.Sum([]byte(raw))
-\treturn "finance:franchisee-report:" + hex.EncodeToString(hash[:])
+	raw := fmt.Sprintf(
+		"report_id=%d|start=%s|end=%s|group_by=%s|limit=%d|offset=%d|order=%s",
+		req.ReportID,
+		strings.TrimSpace(req.StartDate),
+		strings.TrimSpace(req.EndDate),
+		strings.TrimSpace(req.GroupBy),
+		req.Limit,
+		req.Offset,
+		canonicalOrderBy(req.OrderBy),
+	)
+	hash := sha1.Sum([]byte(raw))
+	return "finance:franchisee-report:" + hex.EncodeToString(hash[:])
 }
 
 func canonicalOrderBy(orderBy []OrderBy) string {
-\tif len(orderBy) == 0 {
-\t\treturn ""
-\t}
+	if len(orderBy) == 0 {
+		return ""
+	}
 
-\tparts := make([]string, 0, len(orderBy))
-\tfor _, order := range orderBy {
-\t\tcol := strings.TrimSpace(order.Column)
-\t\tdir := strings.ToUpper(strings.TrimSpace(order.Direction))
-\t\tif dir != "DESC" {
-\t\t\tdir = "ASC"
-\t\t}
-\t\tif col == "" {
-\t\t\tcontinue
-\t\t}
-\t\tparts = append(parts, col+":"+dir)
-\t}
+	parts := make([]string, 0, len(orderBy))
+	for _, order := range orderBy {
+		col := strings.TrimSpace(order.Column)
+		dir := strings.ToUpper(strings.TrimSpace(order.Direction))
+		if dir != "DESC" {
+			dir = "ASC"
+		}
+		if col == "" {
+			continue
+		}
+		parts = append(parts, col+":"+dir)
+	}
 
-\treturn strings.Join(parts, ",")
+	return strings.Join(parts, ",")
 }
 
 func getCachedFranchiseeReport(ctx context.Context, req FranchiseeReportRequest) (*FranchiseeReportResponse, bool) {
-\tclient := getReportCacheClient()
-\tif client == nil {
-\t\treturn nil, false
-\t}
+	client := getReportCacheClient()
+	if client == nil {
+		return nil, false
+	}
 
-\tkey := franchiseeReportCacheKey(req)
-\tencoded, err := client.Get(ctx, key).Result()
-\tif err != nil {
-\t\treturn nil, false
-\t}
+	key := franchiseeReportCacheKey(req)
+	encoded, err := client.Get(ctx, key).Result()
+	if err != nil {
+		return nil, false
+	}
 
-\tvar resp FranchiseeReportResponse
-\tif err := json.Unmarshal([]byte(encoded), &resp); err != nil {
-\t\treturn nil, false
-\t}
+	var resp FranchiseeReportResponse
+	if err := json.Unmarshal([]byte(encoded), &resp); err != nil {
+		return nil, false
+	}
 
-\treturn &resp, true
+	return &resp, true
 }
 
 func setCachedFranchiseeReport(ctx context.Context, req FranchiseeReportRequest, resp *FranchiseeReportResponse) {
-\tif resp == nil {
-\t\treturn
-\t}
+	if resp == nil {
+		return
+	}
 
-\tclient := getReportCacheClient()
-\tif client == nil {
-\t\treturn
-\t}
+	client := getReportCacheClient()
+	if client == nil {
+		return
+	}
 
-\tencoded, err := json.Marshal(resp)
-\tif err != nil {
-\t\treturn
-\t}
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
 
-\tkey := franchiseeReportCacheKey(req)
-\t_ = client.Set(ctx, key, encoded, franchiseeReportCacheTTL).Err()
+	key := franchiseeReportCacheKey(req)
+	_ = client.Set(ctx, key, encoded, franchiseeReportCacheTTL).Err()
 }
