@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -236,20 +237,27 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	}
 
 	itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount := extractSubInvoiceItemSnapshot(otherItems)
-
-	res, err := r.db1.ExecContext(ctx,
-		`INSERT INTO franchise_invoice_sub
+	insertQuery := `INSERT INTO franchise_invoice_sub
 		 (parent_invoice_id, invoice, branch, owner_name_id, month_year, start_date, end_date,
 		  invoice_date, total_sale, royality, cgst, sgst, igst, calculated_igst,
 		  item_name, item_hsn, item_cgst_rate, item_sgst_rate, item_igst_rate, item_gst_amount,
-		  other_items, grant_total, proforma, created_by, created_at, modified_by, modified_at, park)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW(),0,NOW(),0)`,
+		  other_items, grant_total, proforma, created_by, created_at, modified_by, modified_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW(),0,NOW())`
+	insertArgs := []any{
 		req.ParentInvoiceID, req.Invoice, branch, ownerNameID, monthYear, startDate, endDate,
 		invoiceDate, totalSale, royality, cgst, sgst, igst, calcIGST,
 		itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount,
 		otherItems, grantTotal, proforma,
-	)
+	}
+	log.Printf("[finance.CreateSubInvoice] query=%s", insertQuery)
+	log.Printf("[finance.CreateSubInvoice] placeholder_count=%d arg_count=%d", strings.Count(insertQuery, "?"), len(insertArgs))
+	for i, arg := range insertArgs {
+		log.Printf("[finance.CreateSubInvoice] arg[%02d]=%#v", i+1, arg)
+	}
+
+	res, err := r.db1.ExecContext(ctx, insertQuery, insertArgs...)
 	if err != nil {
+		log.Printf("[finance.CreateSubInvoice] exec error: %v", err)
 		return 0, err
 	}
 	return res.LastInsertId()
