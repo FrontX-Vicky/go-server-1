@@ -122,6 +122,6 @@ func DBConfigFromPrefix(prefix string) DBConfig {
 		User:   get("USER", ""),
 		Pass:   get("PASS", ""),
 		Name:   get("NAME", ""),
-		Params: get("PARAMS", "charset=utf8mb4&parseTime=True&loc=Local"),
+		Params: get("PARAMS", "charset=utf8mb4&parseTime=True&loc=Local&checkConnLiveness=true&timeout=30s&readTimeout=60s&writeTimeout=60s"),
 	}
 }

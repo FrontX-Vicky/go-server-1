@@ -334,58 +334,643 @@ func (r *FranchiseInvoiceRepo) DeleteSubInvoice(ctx context.Context, subInvoiceI
 	return err
 }
 
-// CreateSalesInvoiceFromSub creates a sales invoice record from a sub-invoice (DB1).
-// This mirrors the PHP frenchisee_sub_invoice_create_sales_invoice logic.
-func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, subInvoiceID int64) (int64, error) {
-	// Fetch the sub-invoice first
+// ─── sales invoice creation helpers ─────────────────────────────────────────
+
+// franchiseSeries holds resolved series config data.
+type franchiseSeries struct {
+	ID                  int64
+	Prefix              string
+	Suffix              string
+	Padding             int
+	CollectionOwnerType string
+	CollectionOwnerID   int64
+}
+
+// ownerDefaults holds owner/customer info from branch_owner_master.
+type ownerDefaults struct {
+	BranchID             int64
+	OwnerName            string
+	OwnerDisplayName     string
+	OwnerCompanyName     string
+	OwnerGSTIN           string
+	OwnerState           string
+	OwnerStateCode       string
+	OwnerCountry         string
+	BillingAddress       string
+	BillingCity          string
+	BillingPincode       string
+	ShippingAddress      string
+	ShippingCity         string
+	ShippingPincode      string
+	ContactPerson        string
+	ContactEmail         string
+	ContactPhone         string
+	Currency             string
+	TaxMode              string
+	SupplyTypeCode       string
+	PlaceOfSupply        string
+	SupplyStateCode      string
+	PaymentTerms         string
+	Notes                string
+	Terms                string
+	SeriesConfigID       int64
+	InvoiceCollectionMode string
+}
+
+// salesLineItem represents a single invoice line item.
+type salesLineItem struct {
+	Description  string
+	HSN          string
+	Quantity     float64
+	Unit         string
+	UnitPrice    float64
+	TaxTreatment string // "taxable" | "exempt"
+	GSTRate      float64
+	CGSTRate     float64
+	SGSTRate     float64
+	IGSTRate     float64
+	LineTotal    float64
+	// Computed:
+	TaxableAmount float64
+	CGSTAmount    float64
+	SGSTAmount    float64
+	IGSTAmount    float64
+	TotalTax      float64
+}
+
+// invoiceTotals holds computed invoice aggregate amounts.
+type invoiceTotals struct {
+	Subtotal       float64
+	TaxableTotal   float64
+	ExemptTotal    float64
+	CGSTTotal      float64
+	SGSTTotal      float64
+	IGSTTotal      float64
+	TotalTaxAmount float64
+	GrandTotal     float64
+}
+
+// resolveFranchiseSeries returns the series config to use for a franchise invoice.
+// If testMode=true it prefers a series with is_test=1; otherwise prefers is_default=1.
+// Owner-specific series is checked first (invoice_collection_mode='owner').
+func (r *FranchiseInvoiceRepo) resolveFranchiseSeries(ctx context.Context, ownerSeriesID int64, collectionMode string, testMode bool) (*franchiseSeries, error) {
+	paddingExpr := `COALESCE(padding, 5)`
+
+	// Try owner-specific series first (unless test mode forces test series).
+	if !testMode && ownerSeriesID > 0 && strings.EqualFold(strings.TrimSpace(collectionMode), "owner") {
+		row := r.db1.QueryRowContext(ctx,
+			`SELECT id, COALESCE(prefix,''), COALESCE(suffix,''), `+paddingExpr+`,
+			        COALESCE(collection_owner_type,'hq'), COALESCE(collection_owner_id,0)
+			 FROM sales_invoice_series_config
+			 WHERE id = ? AND active_flag = 1 LIMIT 1`,
+			ownerSeriesID,
+		)
+		var s franchiseSeries
+		err := row.Scan(&s.ID, &s.Prefix, &s.Suffix, &s.Padding, &s.CollectionOwnerType, &s.CollectionOwnerID)
+		if err == nil && s.ID > 0 {
+			return &s, nil
+		}
+	}
+
+	// Fall back to company-level test or default series.
+	var whereClause string
+	if testMode {
+		whereClause = `is_test = 1 AND active_flag = 1`
+	} else {
+		whereClause = `is_default = 1 AND active_flag = 1`
+	}
 	row := r.db1.QueryRowContext(ctx,
-		`SELECT id, COALESCE(invoice,''), COALESCE(invoice_date,'0000-00-00'),
-		        COALESCE(royality,0), COALESCE(cgst,0), COALESCE(sgst,0),
-		        COALESCE(igst,0), COALESCE(grant_total,0), COALESCE(other_items,'')
+		`SELECT id, COALESCE(prefix,''), COALESCE(suffix,''), `+paddingExpr+`,
+		        COALESCE(collection_owner_type,'hq'), COALESCE(collection_owner_id,0)
+		 FROM sales_invoice_series_config
+		 WHERE `+whereClause+`
+		 ORDER BY id ASC LIMIT 1`,
+	)
+	var s franchiseSeries
+	if err := row.Scan(&s.ID, &s.Prefix, &s.Suffix, &s.Padding, &s.CollectionOwnerType, &s.CollectionOwnerID); err != nil {
+		if err == sql.ErrNoRows {
+			if testMode {
+				return nil, fmt.Errorf("no active test series found in sales_invoice_series_config (set is_test=1 on a series)")
+			}
+			return nil, fmt.Errorf("no active default series found in sales_invoice_series_config (set is_default=1 on a series)")
+		}
+		return nil, err
+	}
+	return &s, nil
+}
+
+// reserveInvoiceNumber atomically claims the next sequence number from the series
+// and returns the formatted invoice number and the raw sequence number.
+func (r *FranchiseInvoiceRepo) reserveInvoiceNumber(ctx context.Context, tx *sql.Tx, seriesID int64, prefix, suffix string, padding int) (invoiceNo string, sequenceNo int64, err error) {
+	// Increment first, then read what we just claimed.
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE sales_invoice_series_config SET next_number = next_number + 1 WHERE id = ?`,
+		seriesID,
+	); err != nil {
+		return "", 0, fmt.Errorf("increment series %d: %w", seriesID, err)
+	}
+	row := tx.QueryRowContext(ctx,
+		`SELECT next_number - 1 FROM sales_invoice_series_config WHERE id = ? FOR UPDATE`,
+		seriesID,
+	)
+	if err = row.Scan(&sequenceNo); err != nil {
+		return "", 0, fmt.Errorf("read sequence for series %d: %w", seriesID, err)
+	}
+	if padding < 1 {
+		padding = 5
+	}
+	invoiceNo = fmt.Sprintf("%s%0*d%s", prefix, padding, sequenceNo, suffix)
+	return invoiceNo, sequenceNo, nil
+}
+
+// fetchOwnerDefaults loads customer/owner info from branch_owner_master.
+func (r *FranchiseInvoiceRepo) fetchOwnerDefaults(ctx context.Context, ownerID int64) (*ownerDefaults, error) {
+	row := r.db1.QueryRowContext(ctx,
+		`SELECT
+		   COALESCE(bid,0),
+		   COALESCE(owner_name,''),
+		   COALESCE(owner_display_name,''),
+		   COALESCE(owner_company_name,''),
+		   COALESCE(owner_gstin,''),
+		   COALESCE(owner_state,''),
+		   COALESCE(owner_state_code,''),
+		   COALESCE(owner_country,'India'),
+		   COALESCE(owner_billing_address,''),
+		   COALESCE(owner_billing_city,''),
+		   COALESCE(owner_billing_pincode,''),
+		   COALESCE(owner_shipping_address,''),
+		   COALESCE(owner_shipping_city,''),
+		   COALESCE(owner_shipping_pincode,''),
+		   COALESCE(shipping_same_as_billing,0),
+		   COALESCE(owner_contact_person,''),
+		   COALESCE(owner_contact_email,''),
+		   COALESCE(owner_contact_phone,''),
+		   COALESCE(owner_currency,'INR'),
+		   COALESCE(tax_mode,''),
+		   COALESCE(supply_type_code,'B2B'),
+		   COALESCE(place_of_supply,''),
+		   COALESCE(supply_state_code,''),
+		   COALESCE(payment_terms,'Due on Receipt'),
+		   COALESCE(notes,''),
+		   COALESCE(terms,''),
+		   COALESCE(sales_invoice_series_config_id,0),
+		   COALESCE(invoice_collection_mode,'owner')
+		 FROM branch_owner_master
+		 WHERE id = ? AND park = 0 LIMIT 1`,
+		ownerID,
+	)
+	var d ownerDefaults
+	var shippingSameAsBilling int
+	if err := row.Scan(
+		&d.BranchID,
+		&d.OwnerName, &d.OwnerDisplayName, &d.OwnerCompanyName,
+		&d.OwnerGSTIN, &d.OwnerState, &d.OwnerStateCode, &d.OwnerCountry,
+		&d.BillingAddress, &d.BillingCity, &d.BillingPincode,
+		&d.ShippingAddress, &d.ShippingCity, &d.ShippingPincode,
+		&shippingSameAsBilling,
+		&d.ContactPerson, &d.ContactEmail, &d.ContactPhone,
+		&d.Currency, &d.TaxMode, &d.SupplyTypeCode,
+		&d.PlaceOfSupply, &d.SupplyStateCode,
+		&d.PaymentTerms, &d.Notes, &d.Terms,
+		&d.SeriesConfigID, &d.InvoiceCollectionMode,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("owner %d not found in branch_owner_master", ownerID)
+		}
+		return nil, err
+	}
+	if shippingSameAsBilling == 1 {
+		d.ShippingAddress = d.BillingAddress
+		d.ShippingCity = d.BillingCity
+		d.ShippingPincode = d.BillingPincode
+	}
+	// Resolve display names.
+	if d.OwnerDisplayName == "" {
+		d.OwnerDisplayName = d.OwnerName
+	}
+	if d.OwnerCompanyName == "" {
+		d.OwnerCompanyName = d.OwnerDisplayName
+	}
+	// Resolve place of supply defaults.
+	if d.PlaceOfSupply == "" {
+		if d.OwnerState != "" {
+			d.PlaceOfSupply = d.OwnerState
+		} else {
+			d.PlaceOfSupply = "Maharashtra"
+		}
+	}
+	if d.SupplyStateCode == "" {
+		if d.OwnerStateCode != "" {
+			d.SupplyStateCode = d.OwnerStateCode
+		} else {
+			d.SupplyStateCode = "27"
+		}
+	}
+	return &d, nil
+}
+
+// parseFranchiseLineItems decodes other_items JSON and returns sales line items.
+// Falls back to a single exempt line item using grantTotal if JSON cannot be parsed.
+func parseFranchiseLineItems(otherItems string, grantTotal float64) []salesLineItem {
+	var decoded map[string]map[string]any
+	if otherItems != "" {
+		if err := json.Unmarshal([]byte(otherItems), &decoded); err != nil {
+			decoded = nil
+		}
+	}
+
+	var items []salesLineItem
+	if len(decoded) > 0 {
+		for label, item := range decoded {
+			amount := toFloat(item["amount"])
+			if amount == 0 {
+				continue
+			}
+			igstRate := toFloat(item["igst"])
+			cgstRate := toFloat(item["cgst"])
+			sgstRate := toFloat(item["sgst"])
+			gstRate := igstRate + cgstRate + sgstRate
+			taxTreatment := "exempt"
+			if gstRate > 0 {
+				taxTreatment = "taxable"
+			}
+			lineTotal := roundFloat(amount*(1+gstRate/100), 2)
+			hsn := strings.TrimSpace(fmt.Sprintf("%v", item["hsn"]))
+			if hsn == "" || hsn == "<nil>" {
+				hsn = defaultFranchiseHSN(label)
+			}
+			unit := "OTH"
+			if strings.ToUpper(hsn) == "620342" {
+				unit = "PCS"
+			}
+			items = append(items, salesLineItem{
+				Description:  label,
+				HSN:          hsn,
+				Quantity:     1,
+				Unit:         unit,
+				UnitPrice:    amount,
+				TaxTreatment: taxTreatment,
+				GSTRate:      gstRate,
+				CGSTRate:     cgstRate,
+				SGSTRate:     sgstRate,
+				IGSTRate:     igstRate,
+				LineTotal:    lineTotal,
+			})
+		}
+	}
+
+	if len(items) == 0 {
+		// Fallback single exempt line item.
+		amt := roundFloat(grantTotal, 2)
+		items = []salesLineItem{{
+			Description:  "Franchisee invoice item",
+			HSN:          "9997",
+			Quantity:     1,
+			Unit:         "OTH",
+			UnitPrice:    amt,
+			TaxTreatment: "exempt",
+			GSTRate:      0,
+			LineTotal:    amt,
+		}}
+	}
+	return items
+}
+
+// defaultFranchiseHSN returns the HSN/SAC for a known franchise line item label.
+func defaultFranchiseHSN(label string) string {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "shirt":
+		return "620342"
+	case "royalty", "royality":
+		return "9997"
+	default:
+		return "9997"
+	}
+}
+
+// computeInvoiceTotals computes aggregate totals from line items.
+// taxMode: "intra" → cgst/sgst split; "inter" → igst only.
+func computeInvoiceTotals(items []salesLineItem, taxMode string) (invoiceTotals, []salesLineItem) {
+	taxMode = strings.ToLower(strings.TrimSpace(taxMode))
+	inter := taxMode == "inter"
+
+	var t invoiceTotals
+	computed := make([]salesLineItem, len(items))
+	for i, item := range items {
+		computed[i] = item
+		t.Subtotal = roundFloat(t.Subtotal+item.UnitPrice*item.Quantity, 2)
+
+		if item.TaxTreatment == "taxable" {
+			taxable := roundFloat(item.UnitPrice*item.Quantity, 2)
+			computed[i].TaxableAmount = taxable
+			t.TaxableTotal = roundFloat(t.TaxableTotal+taxable, 2)
+
+			if inter {
+				igstAmt := roundFloat(taxable*item.IGSTRate/100, 2)
+				if item.IGSTRate == 0 {
+					igstAmt = roundFloat(taxable*item.GSTRate/100, 2)
+				}
+				computed[i].IGSTAmount = igstAmt
+				t.IGSTTotal = roundFloat(t.IGSTTotal+igstAmt, 2)
+			} else {
+				cgstAmt := roundFloat(taxable*item.CGSTRate/100, 2)
+				sgstAmt := roundFloat(taxable*item.SGSTRate/100, 2)
+				if item.CGSTRate == 0 && item.SGSTRate == 0 && item.GSTRate > 0 {
+					half := roundFloat(item.GSTRate/2, 2)
+					cgstAmt = roundFloat(taxable*half/100, 2)
+					sgstAmt = cgstAmt
+				}
+				computed[i].CGSTAmount = cgstAmt
+				computed[i].SGSTAmount = sgstAmt
+				t.CGSTTotal = roundFloat(t.CGSTTotal+cgstAmt, 2)
+				t.SGSTTotal = roundFloat(t.SGSTTotal+sgstAmt, 2)
+			}
+			totalTax := computed[i].CGSTAmount + computed[i].SGSTAmount + computed[i].IGSTAmount
+			computed[i].TotalTax = roundFloat(totalTax, 2)
+		} else {
+			t.ExemptTotal = roundFloat(t.ExemptTotal+item.UnitPrice*item.Quantity, 2)
+		}
+	}
+	t.TotalTaxAmount = roundFloat(t.CGSTTotal+t.SGSTTotal+t.IGSTTotal, 2)
+	t.GrandTotal = roundFloat(t.TaxableTotal+t.ExemptTotal+t.TotalTaxAmount, 2)
+	return t, computed
+}
+
+// salesInvoiceColumns queries and caches the column set for sales_invoice_master.
+var siMasterCols map[string]bool
+var siItemCols map[string]bool
+
+func (r *FranchiseInvoiceRepo) loadSalesInvoiceCols(ctx context.Context) (master map[string]bool, items map[string]bool, err error) {
+	if siMasterCols != nil && siItemCols != nil {
+		return siMasterCols, siItemCols, nil
+	}
+	loadCols := func(table string) (map[string]bool, error) {
+		rows, err := r.db1.QueryContext(ctx, `SHOW COLUMNS FROM `+table)
+		if err != nil {
+			return nil, fmt.Errorf("SHOW COLUMNS %s: %w", table, err)
+		}
+		defer rows.Close()
+		cols := map[string]bool{}
+		for rows.Next() {
+			var field, typ, null, key, extra string
+			var def sql.NullString
+			if err := rows.Scan(&field, &typ, &null, &key, &def, &extra); err != nil {
+				return nil, err
+			}
+			cols[field] = true
+		}
+		return cols, rows.Err()
+	}
+	siMasterCols, err = loadCols("sales_invoice_master")
+	if err != nil {
+		return nil, nil, err
+	}
+	// sales_invoice_item may not exist in all deployments; treat gracefully.
+	siItemCols, err = loadCols("sales_invoice_item")
+	if err != nil {
+		siItemCols = map[string]bool{}
+	}
+	return siMasterCols, siItemCols, nil
+}
+
+// roundFloat rounds f to d decimal places.
+func roundFloat(f float64, d int) float64 {
+	p := 1.0
+	for range make([]struct{}, d) {
+		p *= 10
+	}
+	return float64(int(f*p+0.5)) / p
+}
+
+// CreateSalesInvoiceFromSub creates a full sales invoice from a sub-invoice.
+// Mirrors PHP's frenchisee_sub_invoice_create_sales_invoice → salesInvoice::save_invoice().
+// testMode=true selects the test invoice series (is_test=1) instead of the default series.
+// A real DB record is always created regardless of testMode.
+func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, subInvoiceID int64, testMode bool) (int64, error) {
+	// 1. Fetch sub-invoice.
+	subRow := r.db1.QueryRowContext(ctx,
+		`SELECT id, COALESCE(owner_name_id,0), COALESCE(invoice_date,'0000-00-00'),
+		        COALESCE(grant_total,0), COALESCE(other_items,'')
 		 FROM franchise_invoice_sub WHERE id = ? AND park = 0`,
 		subInvoiceID,
 	)
 	var (
-		id          int64
-		invoice     string
+		subID       int64
+		ownerID     int64
 		invoiceDate string
-		royality    float64
-		cgst        float64
-		sgst        float64
-		igst        float64
 		grantTotal  float64
 		otherItems  string
 	)
-	if err := row.Scan(&id, &invoice, &invoiceDate, &royality, &cgst, &sgst, &igst, &grantTotal, &otherItems); err != nil {
+	if err := subRow.Scan(&subID, &ownerID, &invoiceDate, &grantTotal, &otherItems); err != nil {
 		return 0, fmt.Errorf("sub-invoice %d not found: %w", subInvoiceID, err)
 	}
+	if invoiceDate == "" || invoiceDate == "0000-00-00" {
+		invoiceDate = time.Now().Format("2006-01-02")
+	}
 
-	// Insert into sales_invoice_master
-	res, err := r.db1.ExecContext(ctx,
-		`INSERT INTO sales_invoice_master
-		 (invoice_no, invoice_date, royality, cgst, sgst, igst, grant_total,
-		  other_items, franchise_im_invoice_id, park, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,0,NOW())`,
-		invoice, invoiceDate, royality, cgst, sgst, igst, grantTotal, otherItems, id,
-	)
+	// 2. Fetch owner defaults (customer snapshot).
+	owner, err := r.fetchOwnerDefaults(ctx, ownerID)
 	if err != nil {
 		return 0, err
+	}
+
+	// 3. Load column sets (cached).
+	masterCols, itemCols, err := r.loadSalesInvoiceCols(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	// 4. Resolve series.
+	series, err := r.resolveFranchiseSeries(ctx, owner.SeriesConfigID, owner.InvoiceCollectionMode, testMode)
+	if err != nil {
+		return 0, err
+	}
+
+	// 5. Parse line items and compute totals.
+	lineItems := parseFranchiseLineItems(otherItems, grantTotal)
+	totals, lineItems := computeInvoiceTotals(lineItems, owner.TaxMode)
+
+	// 6. Begin transaction.
+	tx, err := r.db1.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// 7. Reserve invoice number.
+	invoiceNo, sequenceNo, err := r.reserveInvoiceNumber(ctx, tx, series.ID, series.Prefix, series.Suffix, series.Padding)
+	if err != nil {
+		return 0, err
+	}
+
+	// 8. Build sales_invoice_master field map.
+	branchID := owner.BranchID
+	if branchID <= 0 {
+		branchID = 27 // PHP default branch
+	}
+	now := time.Now().Format("2006-01-02 15:04:05")
+	fields := map[string]any{
+		"branch_id":              branchID,
+		"invoice_no":             invoiceNo,
+		"display_invoice_no":     invoiceNo,
+		"auto_number":            1,
+		"series_config_id":       series.ID,
+		"sequence_no":            sequenceNo,
+		"prefix_snapshot":        series.Prefix,
+		"suffix_snapshot":        series.Suffix,
+		"owner_type":             series.CollectionOwnerType,
+		"owner_id":               nullableInt(series.CollectionOwnerID),
+		"owner_id_resolved":      nullableInt(ownerID),
+		"owner_resolution_source": "owner",
+		"series_resolution_source": func() string {
+			if testMode {
+				return "b2b_test_series"
+			}
+			return "b2b_company_default"
+		}(),
+		"billing_context_type":   "b2b",
+		"source_type":            "franchisee_sub_invoice",
+		"source_id":              subID,
+		"customer_display_name":  owner.OwnerDisplayName,
+		"customer_company_name":  owner.OwnerCompanyName,
+		"customer_gstin":         owner.OwnerGSTIN,
+		"customer_state":         owner.OwnerState,
+		"customer_state_code":    owner.OwnerStateCode,
+		"customer_country":       owner.OwnerCountry,
+		"customer_billing_address":  owner.BillingAddress,
+		"customer_billing_city":     owner.BillingCity,
+		"customer_billing_pincode":  owner.BillingPincode,
+		"customer_shipping_address": owner.ShippingAddress,
+		"customer_shipping_city":    owner.ShippingCity,
+		"customer_shipping_pincode": owner.ShippingPincode,
+		"customer_contact_person": owner.ContactPerson,
+		"customer_contact_email":  owner.ContactEmail,
+		"customer_contact_phone":  owner.ContactPhone,
+		"customer_currency":       owner.Currency,
+		"place_of_supply":         owner.PlaceOfSupply,
+		"supply_state_code":       owner.SupplyStateCode,
+		"supply_type_code":        owner.SupplyTypeCode,
+		"invoice_date":            invoiceDate,
+		"due_date":                invoiceDate,
+		"payment_terms":           owner.PaymentTerms,
+		"notes":                   owner.Notes,
+		"terms":                   owner.Terms,
+		"status":                  "draft",
+		"tax_profile_type":        "exempt",
+		"is_tax_exempt":           1,
+		"currency_code":           owner.Currency,
+		"currency_rate":           1.0,
+		"subtotal_amount":         totals.Subtotal,
+		"taxable_amount":          totals.TaxableTotal,
+		"exempt_amount":           totals.ExemptTotal,
+		"cgst_amount":             totals.CGSTTotal,
+		"sgst_amount":             totals.SGSTTotal,
+		"igst_amount":             totals.IGSTTotal,
+		"total_tax_amount":        totals.TotalTaxAmount,
+		"grand_total":             totals.GrandTotal,
+		"total_amount":            totals.GrandTotal,
+		"total_invoice_amount":    totals.GrandTotal,
+		"paid_amount":             0.0,
+		"balance_amount":          totals.GrandTotal,
+		"balance_due":             totals.GrandTotal,
+		"payment_status":          "unpaid",
+		"park":                    0,
+		"created_at":              now,
+	}
+
+	// 9. Filter to only existing columns.
+	cols := []string{}
+	vals := []any{}
+	for col, val := range fields {
+		if masterCols[col] {
+			cols = append(cols, "`"+col+"`")
+			vals = append(vals, val)
+		}
+	}
+	placeholders := strings.Repeat("?,", len(cols))
+	placeholders = strings.TrimSuffix(placeholders, ",")
+	insertSQL := `INSERT INTO sales_invoice_master (` + strings.Join(cols, ",") + `) VALUES (` + placeholders + `)`
+
+	res, err := tx.ExecContext(ctx, insertSQL, vals...)
+	if err != nil {
+		return 0, fmt.Errorf("insert sales_invoice_master: %w", err)
 	}
 	salesInvoiceID, err := res.LastInsertId()
 	if err != nil {
 		return 0, err
 	}
 
-	// Link back to the sub-invoice
-	if _, err := r.db1.ExecContext(ctx,
-		`UPDATE franchise_invoice_sub SET sales_invoice_id = ?, sales_invoice_no = ?, sales_invoice_status = ?
-		 WHERE id = ?`,
-		salesInvoiceID, invoice, "created", id,
-	); err != nil {
-		return salesInvoiceID, err
+	// 10. Insert line items (if table/columns exist).
+	if len(itemCols) > 0 {
+		for _, item := range lineItems {
+			itemFields := map[string]any{
+				"invoice_id":    salesInvoiceID,
+				"description":   item.Description,
+				"hsn_sac":       item.HSN,
+				"quantity":      item.Quantity,
+				"unit":          item.Unit,
+				"unit_price":    item.UnitPrice,
+				"discount_type": "amount",
+				"discount_value": 0.0,
+				"tax_treatment": item.TaxTreatment,
+				"gst_rate":      item.GSTRate,
+				"cgst_rate":     item.CGSTRate,
+				"sgst_rate":     item.SGSTRate,
+				"igst_rate":     item.IGSTRate,
+				"taxable_amount": item.TaxableAmount,
+				"cgst_amount":   item.CGSTAmount,
+				"sgst_amount":   item.SGSTAmount,
+				"igst_amount":   item.IGSTAmount,
+				"total_tax":     item.TotalTax,
+				"line_total":    item.LineTotal,
+				"park":          0,
+				"created_at":    now,
+			}
+			iCols := []string{}
+			iVals := []any{}
+			for col, val := range itemFields {
+				if itemCols[col] {
+					iCols = append(iCols, "`"+col+"`")
+					iVals = append(iVals, val)
+				}
+			}
+			if len(iCols) > 0 {
+				ph := strings.TrimSuffix(strings.Repeat("?,", len(iCols)), ",")
+				_, err = tx.ExecContext(ctx, `INSERT INTO sales_invoice_item (`+strings.Join(iCols, ",")+`) VALUES (`+ph+`)`, iVals...)
+				if err != nil {
+					return 0, fmt.Errorf("insert sales_invoice_item: %w", err)
+				}
+			}
+		}
 	}
 
+	// 11. Update franchise_invoice_sub with the new sales invoice reference.
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE franchise_invoice_sub
+		 SET sales_invoice_id = ?, sales_invoice_no = ?, sales_invoice_status = 'created',
+		     sales_invoice_created_at = ?, modified_at = ?
+		 WHERE id = ? AND park = 0`,
+		salesInvoiceID, invoiceNo, now, now, subID,
+	); err != nil {
+		return 0, fmt.Errorf("update franchise_invoice_sub: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
 	return salesInvoiceID, nil
+}
+
+// nullableInt returns nil (NULL) for zero values, otherwise returns the int64.
+func nullableInt(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 func extractSubInvoiceItemSnapshot(raw string) (itemName, itemHSN string, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount float64) {

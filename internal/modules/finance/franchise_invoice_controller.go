@@ -183,13 +183,14 @@ func (ctl *FranchiseInvoiceController) DeleteSubInvoice(c *gin.Context) {
 func (ctl *FranchiseInvoiceController) CreateSalesInvoice(c *gin.Context) {
 	var body struct {
 		SubInvoiceID int64 `json:"sub_invoice_id"`
+		TestMode     bool  `json:"test_mode"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.SubInvoiceID <= 0 {
 		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "valid sub_invoice_id is required"})
 		return
 	}
 
-	salesID, err := ctl.Repo.CreateSalesInvoiceFromSub(c.Request.Context(), body.SubInvoiceID)
+	salesID, err := ctl.Repo.CreateSalesInvoiceFromSub(c.Request.Context(), body.SubInvoiceID, body.TestMode)
 	if err != nil {
 		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
