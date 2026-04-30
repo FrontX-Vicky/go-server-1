@@ -46,6 +46,15 @@ func DB(name string) *sql.DB {
 	return c.DB
 }
 
+// DBx returns the *SQL wrapper (with retry helpers) for a registered name, or panics if missing.
+func DBx(name string) *SQL {
+	c := Must(name)
+	if c == nil {
+		panic(fmt.Sprintf("db: connection %q not initialized", name))
+	}
+	return c
+}
+
 // CloseAll closes every registered connection.
 func CloseAll() {
 	regMu.Lock()

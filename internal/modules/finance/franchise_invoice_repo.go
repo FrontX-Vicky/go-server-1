@@ -14,14 +14,14 @@ import (
 )
 
 type FranchiseInvoiceRepo struct {
-	db1 *sql.DB
-	db2 *sql.DB
+	db1 *coredb.SQL
+	db2 *coredb.SQL
 }
 
 func NewFranchiseInvoiceRepo() *FranchiseInvoiceRepo {
 	return &FranchiseInvoiceRepo{
-		db1: coredb.DB("DB1"),
-		db2: coredb.DB("DB2"),
+		db1: coredb.DBx("DB1"),
+		db2: coredb.DBx("DB2"),
 	}
 }
 
@@ -1010,74 +1010,497 @@ func extractSubInvoiceItemSnapshot(raw string) (itemName, itemHSN string, itemCG
 	return
 }
 
-// GetMemberTransferAnnexure returns transfer annexure data from DB2.
-func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ownerID int64, startDate, endDate string) (*MemberTransferAnnexure, error) {
-	rows, err := r.db2.QueryContext(ctx,
-		`SELECT direction, member_name, sessions, tds_amount, net_amount, forward_amount
-		 FROM om_franchisee_member_transfer
-		 WHERE owner_id = ? AND start_date = ? AND end_date = ?
-		 ORDER BY direction, member_name`,
-		ownerID, startDate, endDate,
+// GetInvoiceList returns the per-invoice royalty payment breakdown for a franchise invoice.
+// Mirrors PHP invoiceFrenchisee.php: fetches report_view_table r_id=300002, replaces
+// #sdate / #edate / #id, executes it to get invoice_ids, then queries invoice_payment_franchisee_view.
+func (r *FranchiseInvoiceRepo) GetInvoiceList(ctx context.Context, franchiseInvoiceID int64) (*InvoiceListResponse, error) {
+	empty := &InvoiceListResponse{Groups: []InvoiceBranchGroup{}, GrandTotal: 0}
+
+	// 1. Fetch parent invoice to get owner + date range.
+	var ownerID int64
+	var startDate, endDate string
+	row := r.db1.QueryRowContext(ctx,
+		`SELECT COALESCE(owner_name_id,0), COALESCE(start_date,''), COALESCE(end_date,'')
+		 FROM franchise_invoice WHERE id = ? AND park = 0 LIMIT 1`,
+		franchiseInvoiceID,
 	)
+	if err := row.Scan(&ownerID, &startDate, &endDate); err != nil {
+		return nil, fmt.Errorf("franchise invoice %d not found: %w", franchiseInvoiceID, err)
+	}
+
+	// 2. Get report view SQL from report_view_table r_id=300002.
+	var viewSQL string
+	vRow := r.db1.QueryRowContext(ctx,
+		`SELECT COALESCE(view,'') FROM report_view_table WHERE r_id = 300002 LIMIT 1`)
+	if err := vRow.Scan(&viewSQL); err != nil {
+		return nil, fmt.Errorf("report_view_table r_id=300002: %w", err)
+	}
+	if strings.TrimSpace(viewSQL) == "" {
+		return empty, nil
+	}
+	viewSQL = strings.ReplaceAll(viewSQL, "#sdate", startDate)
+	viewSQL = strings.ReplaceAll(viewSQL, "#edate", endDate)
+	viewSQL = strings.ReplaceAll(viewSQL, "#id", fmt.Sprintf("%d", ownerID))
+
+	// 3. Execute view SQL to get comma-separated invoice_ids.
+	// Wrap in a subquery so we always scan exactly one column (invoice_ids).
+	// Use QueryContext (retry-enabled) so a stale pool connection triggers a fresh-conn retry.
+	wrappedSQL := "SELECT invoice_ids FROM (" + viewSQL + ") AS _view_wrapper LIMIT 1"
+	idRows, err := r.db1.QueryContext(ctx, wrappedSQL)
 	if err != nil {
-		// Table may not exist in all deployments; return empty rather than error.
-		return &MemberTransferAnnexure{Title: "Member Transfer Annexure", Sections: []AnnexureSection{}}, nil
+		return nil, fmt.Errorf("execute view SQL: %w", err)
+	}
+	var invoiceIDsNull sql.NullString
+	if idRows.Next() {
+		if scanErr := idRows.Scan(&invoiceIDsNull); scanErr != nil {
+			idRows.Close()
+			return nil, fmt.Errorf("scan invoice_ids: %w", scanErr)
+		}
+	}
+	idRows.Close()
+	if err := idRows.Err(); err != nil {
+		return nil, fmt.Errorf("invoice_ids rows error: %w", err)
+	}
+	if !invoiceIDsNull.Valid || strings.TrimSpace(invoiceIDsNull.String) == "" {
+		return empty, nil
+	}
+	invoiceIDsRaw := invoiceIDsNull.String
+
+	// Validate: only digits and commas (guard against SQL injection from DB data).
+	for _, ch := range invoiceIDsRaw {
+		if ch != ',' && (ch < '0' || ch > '9') {
+			return empty, nil
+		}
+	}
+
+	// 4. Fetch invoice payment details.
+	// Mirrors PHP: _.amount in invoice_payment_franchisee_view is the invoice amount column.
+	// CASE condition has NO Coupon filter (matches PHP invoiceFrenchisee.php exactly).
+	dataQ := `SELECT
+		COALESCE(_.invoice,''),
+		COALESCE(_.fullname,''),
+		COALESCE(_.pay_date_string,''),
+		COALESCE(_.pay_mode_text,''),
+		COALESCE(_.branch,''),
+		COALESCE(_.venue,''),
+		_.invoice_id,
+		(CASE
+		    WHEN _.bid = 9 THEN COALESCE(_.calculated_amount, _.pay_amount)
+		    WHEN (COALESCE(_.tax,0) > 0 OR COALESCE(_.item_disallowed_discount,0) > 0 OR COALESCE(_.item_discount,0) > 0)
+		    THEN _.amount - COALESCE(_.item_discount,0) + COALESCE(_.item_disallowed_discount,0)
+		    ELSE COALESCE(_.pay_amount, 0)
+		END) - COALESCE(p.amount, 0) AS pay_amount
+	FROM invoice_payment_franchisee_view AS _
+	LEFT JOIN (
+		SELECT invoice_id, SUM(amount) AS amount
+		FROM payment WHERE pay_mode_text = 'Points'
+		GROUP BY invoice_id
+	) p ON p.invoice_id = _.invoice_id
+	WHERE _.invoice_id IN (` + invoiceIDsRaw + `)
+	  AND _.pay_mode_text != 'Points'
+	ORDER BY _.branch, _.venue ASC`
+
+	rows, err := r.db1.QueryContext(ctx, dataQ)
+	if err != nil {
+		return nil, fmt.Errorf("invoice_payment_franchisee_view query: %w", err)
 	}
 	defer rows.Close()
 
-	fromRows := []map[string]any{}
-	toRows := []map[string]any{}
-	var fromForward, fromAfterTDS, toForward, toAfterTDS float64
+	// 5. Group by branch.
+	groupMap := map[string]*InvoiceBranchGroup{}
+	var groupOrder []string
+	var grandTotal float64
 
 	for rows.Next() {
-		var direction, memberName string
-		var sessions int
-		var tdsAmount, netAmount, forwardAmount float64
-		if err := rows.Scan(&direction, &memberName, &sessions, &tdsAmount, &netAmount, &forwardAmount); err != nil {
+		var row InvoiceListRow
+		if err := rows.Scan(&row.InvoiceNo, &row.FullName, &row.PayDate, &row.PayMode,
+			&row.Branch, &row.Venue, &row.InvoiceID, &row.Amount); err != nil {
 			continue
 		}
-		entry := map[string]any{
-			"member_name":    memberName,
-			"sessions":       sessions,
-			"tds_amount":     tdsAmount,
-			"net_amount":     netAmount,
-			"forward_amount": forwardAmount,
+		row.Amount = roundFloat(row.Amount, 2)
+		if _, ok := groupMap[row.Branch]; !ok {
+			groupMap[row.Branch] = &InvoiceBranchGroup{Branch: row.Branch, Rows: []InvoiceListRow{}}
+			groupOrder = append(groupOrder, row.Branch)
 		}
-		if strings.EqualFold(direction, "FROM") {
-			fromRows = append(fromRows, entry)
-			fromForward += forwardAmount
-			fromAfterTDS += netAmount
+		groupMap[row.Branch].Rows = append(groupMap[row.Branch].Rows, row)
+		groupMap[row.Branch].Total = roundFloat(groupMap[row.Branch].Total+row.Amount, 2)
+		grandTotal = roundFloat(grandTotal+row.Amount, 2)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan invoice list rows: %w", err)
+	}
+
+	groups := make([]InvoiceBranchGroup, 0, len(groupOrder))
+	for _, branch := range groupOrder {
+		groups = append(groups, *groupMap[branch])
+	}
+	return &InvoiceListResponse{Groups: groups, GrandTotal: grandTotal}, nil
+}
+
+// GetMemberTransferAnnexure returns transfer annexure data from DB1.
+// Mirrors PHP member_transfer_annexure_om_franchisee / check_out_om_franchisee / check_in_om_franchisee.
+func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ownerID int64, startDate, endDate string) (*MemberTransferAnnexure, error) {
+	empty := &MemberTransferAnnexure{Title: "Member Transfer Annexure", Sections: []AnnexureSection{}}
+
+	// ── Step 1: get owner's branches ────────────────────────────────────────
+	brows, err := r.db1.QueryContext(ctx,
+		`SELECT id FROM branch WHERE invoice_name_id = ? AND park = 0`, ownerID)
+	if err != nil {
+		return empty, nil
+	}
+	var branchIDs []int64
+	for brows.Next() {
+		var id int64
+		if err := brows.Scan(&id); err == nil {
+			branchIDs = append(branchIDs, id)
+		}
+	}
+	_ = brows.Close()
+	if len(branchIDs) == 0 {
+		return empty, nil
+	}
+
+	inPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(branchIDs)), ",")
+	branchArgs := make([]any, len(branchIDs))
+	for i, id := range branchIDs {
+		branchArgs[i] = id
+	}
+
+	// ── Step 2: fetch transfers (FROM and TO) in two batched queries ────────
+	type transferRow struct {
+		InvoiceID     int64
+		ContactID     int64
+		MemberName    string
+		FromBidName   string
+		ToBidName     string
+		FromOwnerID   int64
+		ToOwnerID     int64
+		FromCatMaster int
+		ToCatMaster   int
+		FromBatch     int64
+		ToBatch       int64
+		ToBid         int64
+		ActionDate    string
+	}
+
+	fetchTransfers := func(direction string) ([]transferRow, error) {
+		var bidFilter string
+		if direction == "FROM" {
+			bidFilter = "mt.from_bid IN (" + inPlaceholders + ")"
 		} else {
-			toRows = append(toRows, entry)
-			toForward += forwardAmount
-			toAfterTDS += netAmount
+			bidFilter = "mt.to_bid IN (" + inPlaceholders + ")"
+		}
+		q := `SELECT mt.invoice_id, mt.contact_id, mt.member_name,
+		             COALESCE(mt.from_bid_name,''), COALESCE(mt.to_bid_name,''),
+		             mt.from_owner_id, mt.to_owner_id,
+		             COALESCE(mt.from_category_master,0), COALESCE(mt.to_category_master,0),
+		             COALESCE(mt.from_batch,0), COALESCE(mt.to_batch,0),
+		             mt.to_bid, mt.action_date
+		      FROM member_transfer_view mt
+		      WHERE mt.status = '1' AND mt.action_date BETWEEN ? AND ?
+		        AND ` + bidFilter + ` AND mt.park = 0`
+		args := append([]any{startDate, endDate}, branchArgs...)
+		rows, err := r.db1.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var result []transferRow
+		for rows.Next() {
+			var t transferRow
+			if err := rows.Scan(
+				&t.InvoiceID, &t.ContactID, &t.MemberName,
+				&t.FromBidName, &t.ToBidName,
+				&t.FromOwnerID, &t.ToOwnerID,
+				&t.FromCatMaster, &t.ToCatMaster,
+				&t.FromBatch, &t.ToBatch,
+				&t.ToBid, &t.ActionDate,
+			); err != nil {
+				continue
+			}
+			result = append(result, t)
+		}
+		return result, rows.Err()
+	}
+
+	fromTransfers, err := fetchTransfers("FROM")
+	if err != nil {
+		fromTransfers = nil
+	}
+	toTransfers, err := fetchTransfers("TO")
+	if err != nil {
+		toTransfers = nil
+	}
+
+	allTransfers := append(fromTransfers, toTransfers...)
+	if len(allTransfers) == 0 {
+		return empty, nil
+	}
+
+	// ── Step 3: collect unique invoice_ids and contact_ids ─────────────────
+	invoiceSet := map[int64]bool{}
+	contactSet := map[int64]bool{}
+	for _, t := range allTransfers {
+		invoiceSet[t.InvoiceID] = true
+		contactSet[t.ContactID] = true
+	}
+	invoiceIDs := make([]int64, 0, len(invoiceSet))
+	for id := range invoiceSet {
+		invoiceIDs = append(invoiceIDs, id)
+	}
+	contactIDs := make([]int64, 0, len(contactSet))
+	for id := range contactSet {
+		contactIDs = append(contactIDs, id)
+	}
+
+	// ── Step 4: invoice payment data for all invoice IDs ────────────────────
+	type invoiceData struct {
+		InvoiceNo       string
+		StartDate       string
+		ServiceSessions int64
+		Amount          float64 // net pay amount
+	}
+	invoiceMap := map[int64]invoiceData{}
+	if len(invoiceIDs) > 0 {
+		invPh := strings.TrimSuffix(strings.Repeat("?,", len(invoiceIDs)), ",")
+		invArgs := make([]any, len(invoiceIDs))
+		for i, id := range invoiceIDs {
+			invArgs[i] = id
+		}
+		invQ := `SELECT ii.invoice_id, ii.invoice, ii.start_date,
+		                COALESCE(si.sessions, 0),
+		                (CASE
+		                    WHEN p.bid = 9 THEN COALESCE(p.actual_amount, p.amount)
+		                    WHEN (COALESCE(ii.tax_amount,0) > 0 OR COALESCE(ii.item_disallowed_discount,0) > 0 OR COALESCE(ii.item_discount,0) > 0)
+		                         AND COALESCE(p.pay_mode_text,'') != 'Coupon'
+		                    THEN ii.invoice_amount + COALESCE(ii.item_disallowed_discount,0) - COALESCE(ii.item_discount,0)
+		                    ELSE COALESCE(p.amount, 0)
+		                END) - COALESCE(pp.amount, 0)
+		         FROM invoice_invoiceitem_view ii
+		         LEFT JOIN service si ON si.id = ii.service_id
+		         LEFT JOIN payment p ON p.invoice_id = ii.invoice_id
+		         LEFT JOIN (SELECT invoice_id, SUM(amount) AS amount FROM payment WHERE pay_mode_text = 'Points' GROUP BY invoice_id) pp
+		                ON pp.invoice_id = ii.invoice_id
+		         WHERE ii.invoice_id IN (` + invPh + `)
+		           AND ii.park = 0 AND ii.master_category_id IN (1, 2) AND ii.bid NOT IN (35)
+		         GROUP BY ii.invoice_id`
+		invRows, err := r.db1.QueryContext(ctx, invQ, invArgs...)
+		if err == nil {
+			defer invRows.Close()
+			for invRows.Next() {
+				var iid int64
+				var d invoiceData
+				if err := invRows.Scan(&iid, &d.InvoiceNo, &d.StartDate, &d.ServiceSessions, &d.Amount); err == nil {
+					invoiceMap[iid] = d
+				}
+			}
 		}
 	}
 
-	annexure := &MemberTransferAnnexure{
+	// ── Step 5: royalty rates by branch_id ──────────────────────────────────
+	onlineRoyaltyMap := map[int64]float64{}
+	offlineRoyaltyMap := map[int64]float64{} // keyed by batch_id
+
+	// Collect unique bid and batch IDs from transfers.
+	bidSet := map[int64]bool{}
+	batchSet := map[int64]bool{}
+	for _, t := range allTransfers {
+		// The royalty rate comes from: online → branch.royalty by transfer bid, offline → venue.royalty by batch.
+		// PHP uses from_bid for FROM direction, to_bid for TO direction.
+		bidSet[t.ToBid] = true
+		batchSet[t.FromBatch] = true
+		batchSet[t.ToBatch] = true
+	}
+	if len(bidSet) > 0 {
+		bidList := make([]any, 0, len(bidSet))
+		bph := ""
+		for id := range bidSet {
+			bidList = append(bidList, id)
+			bph += "?,"
+		}
+		bph = strings.TrimSuffix(bph, ",")
+		royaltyRows, err := r.db1.QueryContext(ctx, `SELECT id, COALESCE(royalty,0) FROM branch WHERE id IN (`+bph+`)`, bidList...)
+		if err == nil {
+			defer royaltyRows.Close()
+			for royaltyRows.Next() {
+				var bid int64
+				var pct float64
+				if err := royaltyRows.Scan(&bid, &pct); err == nil {
+					onlineRoyaltyMap[bid] = pct
+				}
+			}
+		}
+	}
+	if len(batchSet) > 0 {
+		batchList := make([]any, 0, len(batchSet))
+		batchPh := ""
+		for id := range batchSet {
+			if id == 0 {
+				continue
+			}
+			batchList = append(batchList, id)
+			batchPh += "?,"
+		}
+		if len(batchList) > 0 {
+			batchPh = strings.TrimSuffix(batchPh, ",")
+			venueRows, err := r.db1.QueryContext(ctx,
+				`SELECT bat.id, COALESCE(v.royalty, 0) FROM batch bat
+				 JOIN venue v ON v.id = bat.venue_id
+				 WHERE bat.id IN (`+batchPh+`)`, batchList...)
+			if err == nil {
+				defer venueRows.Close()
+				for venueRows.Next() {
+					var batchID int64
+					var pct float64
+					if err := venueRows.Scan(&batchID, &pct); err == nil {
+						offlineRoyaltyMap[batchID] = pct
+					}
+				}
+			}
+		}
+	}
+
+	// ── Step 6: attendance counts per contact_id, action_date, to_bid ───────
+	// key: "contactID|actionDate|toBid" → count of sessions attended before transfer
+	attendanceKey := func(contactID int64, actionDate string, toBid int64) string {
+		return fmt.Sprintf("%d|%s|%d", contactID, actionDate, toBid)
+	}
+	attendanceMap := map[string]int64{}
+	if len(contactIDs) > 0 {
+		contPh := strings.TrimSuffix(strings.Repeat("?,", len(contactIDs)), ",")
+		contArgs := make([]any, len(contactIDs))
+		for i, id := range contactIDs {
+			contArgs[i] = id
+		}
+		// Fetch all attendance rows for involved contacts in date range; compute counts in Go.
+		attQ := `SELECT contact_id, date, bid FROM attendance_cont_view
+		         WHERE contact_id IN (` + contPh + `) AND park = 0 AND date <= ?`
+		attArgs := append(contArgs, endDate)
+		attRows, err := r.db1.QueryContext(ctx, attQ, attArgs...)
+		if err == nil {
+			type attRow struct {
+				ContactID int64
+				Date      string
+				Bid       int64
+			}
+			var attData []attRow
+			for attRows.Next() {
+				var a attRow
+				if err := attRows.Scan(&a.ContactID, &a.Date, &a.Bid); err == nil {
+					attData = append(attData, a)
+				}
+			}
+			_ = attRows.Close()
+
+			// For each transfer, count relevant attendance.
+			for _, t := range allTransfers {
+				invData := invoiceMap[t.InvoiceID]
+				count := int64(0)
+				for _, a := range attData {
+					if a.ContactID != t.ContactID {
+						continue
+					}
+					// Attendance on or after service start, before transfer date.
+					if a.Date < invData.StartDate {
+						continue
+					}
+					if a.Date < t.ActionDate {
+						count++
+					} else if a.Date == t.ActionDate && a.Bid != t.ToBid {
+						count++
+					}
+				}
+				key := attendanceKey(t.ContactID, t.ActionDate, t.ToBid)
+				attendanceMap[key] = count
+			}
+		}
+	}
+
+	// ── Step 7: build result rows ────────────────────────────────────────────
+	buildRows := func(transfers []transferRow) ([]map[string]any, float64) {
+		var total float64
+		rows := []map[string]any{}
+		for _, t := range transfers {
+			invData := invoiceMap[t.InvoiceID]
+			if invData.ServiceSessions <= 0 {
+				continue
+			}
+			// Royalty percentage.
+			royaltyPct := onlineRoyaltyMap[t.ToBid]
+			if t.FromCatMaster == 2 || t.ToCatMaster == 2 {
+				if pct, ok := offlineRoyaltyMap[t.FromBatch]; ok {
+					royaltyPct = pct
+				} else if pct, ok := offlineRoyaltyMap[t.ToBatch]; ok {
+					royaltyPct = pct
+				}
+			}
+			royaltyAmount := invData.Amount * (float64(100-royaltyPct) / 100)
+			perSession := royaltyAmount / float64(invData.ServiceSessions)
+
+			key := attendanceKey(t.ContactID, t.ActionDate, t.ToBid)
+			prevAtt := attendanceMap[key]
+			pendingSession := invData.ServiceSessions - prevAtt
+			if pendingSession < 0 {
+				pendingSession = 0
+			}
+			forwardAmt := roundFloat(perSession*float64(pendingSession), 0)
+
+			sameOwner := 0
+			if t.FromOwnerID == t.ToOwnerID {
+				sameOwner = 1
+			} else {
+				total += forwardAmt
+			}
+
+			rows = append(rows, map[string]any{
+				"invoice_no":      invData.InvoiceNo,
+				"name":            t.MemberName,
+				"from_bid":        t.FromBidName,
+				"to_bid":          t.ToBidName,
+				"total_session":   invData.ServiceSessions,
+				"amount":          roundFloat(invData.Amount, 2),
+				"share":           roundFloat(royaltyAmount, 2),
+				"pending_session": pendingSession,
+				"forward":         forwardAmt,
+				"after_tds":       forwardAmt, // no TDS for OM franchisees
+				"same_owner":      sameOwner,
+			})
+		}
+		return rows, total
+	}
+
+	fromMapped, fromTotal := buildRows(fromTransfers)
+	toMapped, toTotal := buildRows(toTransfers)
+	if fromMapped == nil {
+		fromMapped = []map[string]any{}
+	}
+	if toMapped == nil {
+		toMapped = []map[string]any{}
+	}
+
+	return &MemberTransferAnnexure{
 		Title: "Member Transfer Annexure",
 		Sections: []AnnexureSection{
 			{
 				Key:   "FROM",
-				Label: "Transferred From Other Center (TTOC)",
-				Rows:  fromRows,
+				Label: "Forward-able Amount (transferred out)",
+				Rows:  fromMapped,
 				Totals: map[string]any{
-					"forward":   fromForward,
-					"after_tds": fromAfterTDS,
+					"forward":   fromTotal,
+					"after_tds": fromTotal,
 				},
 			},
 			{
 				Key:   "TO",
-				Label: "Transferred To Other Center (TFOC)",
-				Rows:  toRows,
+				Label: "Receivable Amount (transferred in)",
+				Rows:  toMapped,
 				Totals: map[string]any{
-					"forward":   toForward,
-					"after_tds": toAfterTDS,
+					"forward":   toTotal,
+					"after_tds": toTotal,
 				},
 			},
 		},
-	}
-	return annexure, rows.Err()
+	}, nil
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────

@@ -130,6 +130,30 @@ type MemberTransferAnnexure struct {
 	Sections []AnnexureSection `json:"sections"`
 }
 
+// ── Invoice list (royalty payment breakdown) ───────────────────────────────
+
+type InvoiceListRow struct {
+	InvoiceNo string  `json:"invoice_no"`
+	FullName  string  `json:"full_name"`
+	PayDate   string  `json:"pay_date"`
+	PayMode   string  `json:"pay_mode"`
+	Branch    string  `json:"branch"`
+	Venue     string  `json:"venue"`
+	Amount    float64 `json:"amount"`
+	InvoiceID int64   `json:"invoice_id"`
+}
+
+type InvoiceBranchGroup struct {
+	Branch string           `json:"branch"`
+	Rows   []InvoiceListRow `json:"rows"`
+	Total  float64          `json:"total"`
+}
+
+type InvoiceListResponse struct {
+	Groups     []InvoiceBranchGroup `json:"groups"`
+	GrandTotal float64              `json:"grand_total"`
+}
+
 type OrderBy struct {
 	Column    string `json:"column"`
 	Direction string `json:"direction"`

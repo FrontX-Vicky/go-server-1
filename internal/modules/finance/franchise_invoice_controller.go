@@ -1,6 +1,7 @@
 package finance
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -214,6 +215,25 @@ func (ctl *FranchiseInvoiceController) GetMemberTransferAnnexure(c *gin.Context)
 		return
 	}
 	httpx.OK(c, gin.H{"data": annexure})
+}
+
+// GetInvoiceList handles GET /finance/franchise-invoice/invoice-list?invoice_id=X
+func (ctl *FranchiseInvoiceController) GetInvoiceList(c *gin.Context) {
+	raw := c.Query("invoice_id")
+	invoiceID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || invoiceID <= 0 {
+		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "valid invoice_id is required"})
+		return
+	}
+	// invoice_payment_franchisee_view is a heavy join — give it more time than the global 20s limit.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+	result, err := ctl.Repo.GetInvoiceList(ctx, invoiceID)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	httpx.OK(c, gin.H{"data": result})
 }
 
 // ── helper ────────────────────────────────────────────────────────────────

@@ -183,19 +183,19 @@ func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]
 }
 
 type Repo struct {
-	db1 *sql.DB
-	db2 *sql.DB
+	db1 *db.SQL
+	db2 *db.SQL
 }
 
 func NewRepo() *Repo {
 	return &Repo{
-		db1: db.DB("DB1"),
-		db2: db.DB("DB2"),
+		db1: db.DBx("DB1"),
+		db2: db.DBx("DB2"),
 	}
 }
 
 // choose picks a DB by name; mirrors test_items behavior
-func (r *Repo) choose(name string) *sql.DB {
+func (r *Repo) choose(name string) *db.SQL {
 	if name == "DB2" {
 		return r.db2
 	}
@@ -544,7 +544,7 @@ func (r *Repo) RunReportQuery(ctx context.Context, id int64, opts map[string]any
 		rows, err = r.db1.QueryContext(ctx, query)
 	}
 	if err != nil {
-		return nil, query, err
+		return nil, query, fmt.Errorf("report %d query failed: %w", id, err)
 	}
 	defer rows.Close()
 
