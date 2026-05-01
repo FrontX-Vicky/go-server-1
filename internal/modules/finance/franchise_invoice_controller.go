@@ -30,6 +30,15 @@ func (ctl *FranchiseInvoiceController) GetFranchiseInvoiceInit(c *gin.Context) {
 		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "start_date and end_date are required"})
 		return
 	}
+	reportID := int64(0)
+	if v := c.Query("report_id"); v != "" {
+		parsed, parseErr := strconv.ParseInt(v, 10, 64)
+		if parseErr != nil || parsed <= 0 {
+			httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "valid report_id is required"})
+			return
+		}
+		reportID = parsed
+	}
 
 	ctx := c.Request.Context()
 
@@ -52,7 +61,7 @@ func (ctl *FranchiseInvoiceController) GetFranchiseInvoiceInit(c *gin.Context) {
 		resp.Invoice = inv
 	} else {
 		// No invoice yet — fetch royalty share and tax data
-		rs, err := ctl.Repo.GetRoyaltyShare(ctx, ownerID, startDate, endDate)
+		rs, err := ctl.Repo.GetRoyaltyShare(ctx, ownerID, reportID, startDate, endDate)
 		if err != nil {
 			httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

@@ -72,23 +72,91 @@ func (r *FranchiseInvoiceRepo) GetFranchiseInvoice(ctx context.Context, ownerID 
 	return &inv, nil
 }
 
-// GetRoyaltyShare fetches total_sale and royalty from om_franchisee_combine_owner (DB2).
-func (r *FranchiseInvoiceRepo) GetRoyaltyShare(ctx context.Context, ownerID int64, startDate, endDate string) (*RoyaltyShare, error) {
-	row := r.db2.QueryRowContext(ctx,
-		`SELECT COALESCE(total_sale,0), COALESCE(royalty,0), COALESCE(month,''), COALESCE(branch,'')
-		 FROM om_franchisee_combine_owner
-		 WHERE owner_id = ? AND start_date = ? AND end_date = ?
-		 LIMIT 1`,
-		ownerID, startDate, endDate,
+// GetRoyaltyShare mirrors legacy getRoyaltyShare: read SQL from report_view_table
+// by reportID, replace #sdate/#edate, run query, and pick the row for ownerID.
+func (r *FranchiseInvoiceRepo) GetRoyaltyShare(ctx context.Context, ownerID, reportID int64, startDate, endDate string) (*RoyaltyShare, error) {
+	if reportID <= 0 {
+		return nil, fmt.Errorf("report_id is required for unsaved invoice init")
+	}
+
+	var viewSQL, subViewSQL string
+	vRow := r.db1.QueryRowContext(ctx,
+		`SELECT COALESCE(view,''), COALESCE(sub_view,'') FROM report_view_table WHERE r_id = ? LIMIT 1`,
+		reportID,
 	)
-	var rs RoyaltyShare
-	if err := row.Scan(&rs.TotalSale, &rs.Royalty, &rs.Month, &rs.Branch); err != nil {
+	if err := vRow.Scan(&viewSQL, &subViewSQL); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("royalty share not found for owner %d", ownerID)
+			return nil, fmt.Errorf("report_view_table r_id=%d not found", reportID)
 		}
+		return nil, fmt.Errorf("report_view_table r_id=%d: %w", reportID, err)
+	}
+
+	if (reportID == 209 || reportID == 211) && strings.TrimSpace(subViewSQL) != "" {
+		viewSQL = subViewSQL
+	}
+	if strings.TrimSpace(viewSQL) == "" {
+		return nil, fmt.Errorf("report_view_table r_id=%d has empty SQL", reportID)
+	}
+
+	viewSQL = strings.ReplaceAll(viewSQL, "#sdate", startDate)
+	viewSQL = strings.ReplaceAll(viewSQL, "#edate", endDate)
+
+	rows, err := r.db1.QueryContext(ctx, viewSQL)
+	if err != nil {
+		return nil, fmt.Errorf("execute royalty view r_id=%d: %w", reportID, err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
 		return nil, err
 	}
-	return &rs, nil
+	raw := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range raw {
+		dest[i] = &raw[i]
+	}
+
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			continue
+		}
+		row := map[string]string{}
+		for i, c := range cols {
+			row[strings.ToLower(c)] = string(raw[i])
+		}
+
+		ownerVal := row["owner_id"]
+		if ownerVal == "" {
+			ownerVal = row["owner_name_id"]
+		}
+		if ownerVal == "" {
+			ownerVal = row["ownerid"]
+		}
+		ownerRowID, _ := strconv.ParseInt(strings.TrimSpace(ownerVal), 10, 64)
+		if ownerRowID != ownerID {
+			continue
+		}
+
+		rs := &RoyaltyShare{
+			TotalSale: toFloat(row["total_sale"]),
+			Royalty:   toFloat(row["royalty"]),
+			Month:     row["month"],
+			Branch:    row["branch"],
+		}
+		if rs.Month == "" {
+			rs.Month = row["month_year"]
+		}
+		if rs.Royalty == 0 {
+			rs.Royalty = toFloat(row["royality"])
+		}
+		return rs, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return nil, fmt.Errorf("royalty share not found for owner %d in r_id=%d", ownerID, reportID)
 }
 
 // GetTaxData fetches cgstTax, sgstTax, igstTax from branch table (DB1).
