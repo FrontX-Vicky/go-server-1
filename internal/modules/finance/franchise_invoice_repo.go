@@ -580,7 +580,7 @@ func (r *FranchiseInvoiceRepo) reserveInvoiceNumber(ctx context.Context, tx *sql
 func (r *FranchiseInvoiceRepo) fetchOwnerDefaults(ctx context.Context, ownerID int64) (*ownerDefaults, error) {
 	row := r.db1.QueryRowContext(ctx,
 		`SELECT
-		   COALESCE(bid,0),
+		   COALESCE(NULLIF(TRIM(COALESCE(bid,'')),''), '0'),
 		   COALESCE(owner_name,''),
 		   COALESCE(owner_display_name,''),
 		   COALESCE(owner_company_name,''),
@@ -613,9 +613,10 @@ func (r *FranchiseInvoiceRepo) fetchOwnerDefaults(ctx context.Context, ownerID i
 		ownerID,
 	)
 	var d ownerDefaults
+	var branchIDRaw string
 	var shippingSameAsBilling int
 	if err := row.Scan(
-		&d.BranchID,
+		&branchIDRaw,
 		&d.OwnerName, &d.OwnerDisplayName, &d.OwnerCompanyName,
 		&d.OwnerGSTIN, &d.OwnerState, &d.OwnerStateCode, &d.OwnerCountry,
 		&d.BillingAddress, &d.BillingCity, &d.BillingPincode,
@@ -631,6 +632,11 @@ func (r *FranchiseInvoiceRepo) fetchOwnerDefaults(ctx context.Context, ownerID i
 			return nil, fmt.Errorf("owner %d not found in branch_owner_master", ownerID)
 		}
 		return nil, err
+	}
+	if parsedBranchID, parseErr := strconv.ParseInt(strings.TrimSpace(branchIDRaw), 10, 64); parseErr == nil {
+		d.BranchID = parsedBranchID
+	} else {
+		d.BranchID = 0
 	}
 	if shippingSameAsBilling == 1 {
 		d.ShippingAddress = d.BillingAddress
@@ -966,9 +972,10 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	}
 
 	// 8. Build sales_invoice_master field map.
-	branchID := owner.BranchID
-	if branchID <= 0 {
-		branchID = 27 // PHP default branch
+	// Franchise sub-invoice sales invoices are booked to bid 35 in test mode, else bid 27.
+	branchID := int64(27)
+	if testMode {
+		branchID = 35
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 	fields := map[string]any{
