@@ -178,15 +178,19 @@ func (r *FranchiseInvoiceRepo) GetTaxData(ctx context.Context, branch string) (*
 
 // CreateFranchiseInvoice inserts a new franchise_invoice row (DB1).
 func (r *FranchiseInvoiceRepo) CreateFranchiseInvoice(ctx context.Context, req CreateFranchiseInvoiceRequest) (int64, error) {
+	monthYear := strings.TrimSpace(req.Month)
+	if monthYear == "" {
+		monthYear = formatMonthYear(req.StartDate)
+	}
+
 	res, err := r.db1.ExecContext(ctx,
 		`INSERT INTO franchise_invoice
 		 (branch, owner_name_id, invoice, total_sale, royality, cgst, sgst, igst,
-		  grant_total, other_items, month, month_year, start_date, end_date, invoice_date, park, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW())`,
+		  grant_total, other_items, month_year, start_date, end_date, invoice_date, park, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW())`,
 		req.Branch, req.OwnerID, req.Invoice, req.TotalSale,
 		req.Royality, req.CGST, req.SGST, req.IGST,
-		req.GrantTotal, req.OtherItems, req.Month,
-		formatMonthYear(req.StartDate),
+		req.GrantTotal, req.OtherItems, monthYear,
 		req.StartDate, req.EndDate, req.InvoiceDate,
 	)
 	if err != nil {
@@ -305,18 +309,39 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	}
 
 	itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount := extractSubInvoiceItemSnapshot(otherItems)
-	insertQuery := `INSERT INTO franchise_invoice_sub
-		 (parent_invoice_id, invoice, branch, owner_name_id, month_year, start_date, end_date,
-		  invoice_date, total_sale, royality, cgst, sgst, igst, calculated_igst,
-		  item_name, item_hsn, item_cgst_rate, item_sgst_rate, item_igst_rate, item_gst_amount,
-		  other_items, grant_total, proforma, created_by, created_at, modified_by, modified_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW(),0,NOW())`
+	// Persist Annexure 1 invoice list JSON on sub-invoice so sales invoice creation can reuse it directly.
+	var annexureJSON string
+	if req.ParentInvoiceID > 0 {
+		if annexureData, annexureErr := r.GetInvoiceList(ctx, req.ParentInvoiceID); annexureErr == nil && annexureData != nil {
+			if wrapped, jsonErr := encodeAnnexureJSON("invoice_list", annexureData); jsonErr == nil {
+				annexureJSON = wrapped
+			}
+		}
+	}
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+	insertCols := []string{
+		"parent_invoice_id", "invoice", "branch", "owner_name_id", "month_year", "start_date", "end_date",
+		"invoice_date", "total_sale", "royality", "cgst", "sgst", "igst", "calculated_igst",
+		"item_name", "item_hsn", "item_cgst_rate", "item_sgst_rate", "item_igst_rate", "item_gst_amount",
+		"other_items", "grant_total", "proforma", "created_by", "created_at", "modified_by", "modified_at",
+	}
 	insertArgs := []any{
 		req.ParentInvoiceID, req.Invoice, branch, ownerNameID, monthYear, startDate, endDate,
 		invoiceDate, totalSale, royality, cgst, sgst, igst, calcIGST,
 		itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount,
-		otherItems, grantTotal, proforma,
+		otherItems, grantTotal, proforma, 0, now, 0, now,
 	}
+
+	if subCols, colsErr := r.loadSubInvoiceCols(ctx); colsErr == nil && annexureJSON != "" {
+		if subCols["annexure_json"] {
+			insertCols = append(insertCols, "annexure_json")
+			insertArgs = append(insertArgs, annexureJSON)
+		}
+	}
+
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(insertCols)), ",")
+	insertQuery := `INSERT INTO franchise_invoice_sub (` + strings.Join(insertCols, ",") + `) VALUES (` + ph + `)`
 	log.Printf("[finance.CreateSubInvoice] query=%s", insertQuery)
 	log.Printf("[finance.CreateSubInvoice] placeholder_count=%d arg_count=%d", strings.Count(insertQuery, "?"), len(insertArgs))
 	for i, arg := range insertArgs {
@@ -767,6 +792,32 @@ func computeInvoiceTotals(items []salesLineItem, taxMode string) (invoiceTotals,
 // salesInvoiceColumns queries and caches the column set for sales_invoice_master.
 var siMasterCols map[string]bool
 var siItemCols map[string]bool
+var subInvoiceCols map[string]bool
+
+func (r *FranchiseInvoiceRepo) loadSubInvoiceCols(ctx context.Context) (map[string]bool, error) {
+	if subInvoiceCols != nil {
+		return subInvoiceCols, nil
+	}
+	rows, err := r.db1.QueryContext(ctx, `SHOW COLUMNS FROM franchise_invoice_sub`)
+	if err != nil {
+		return nil, fmt.Errorf("SHOW COLUMNS franchise_invoice_sub: %w", err)
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var field, typ, null, key, extra string
+		var def sql.NullString
+		if err := rows.Scan(&field, &typ, &null, &key, &def, &extra); err != nil {
+			return nil, err
+		}
+		cols[field] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	subInvoiceCols = cols
+	return subInvoiceCols, nil
+}
 
 func (r *FranchiseInvoiceRepo) loadSalesInvoiceCols(ctx context.Context) (master map[string]bool, items map[string]bool, err error) {
 	if siMasterCols != nil && siItemCols != nil {
@@ -810,6 +861,19 @@ func roundFloat(f float64, d int) float64 {
 	return float64(int(f*p+0.5)) / p
 }
 
+func encodeAnnexureJSON(annexureType string, payload any) (string, error) {
+	envelope := map[string]any{
+		"type":    strings.TrimSpace(annexureType),
+		"version": 1,
+		"data":    payload,
+	}
+	b, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // CreateSalesInvoiceFromSub creates a full sales invoice from a sub-invoice.
 // Mirrors PHP's frenchisee_sub_invoice_create_sales_invoice → salesInvoice::save_invoice().
 // testMode=true selects the test invoice series (is_test=1) instead of the default series.
@@ -837,6 +901,18 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		invoiceDate = time.Now().Format("2006-01-02")
 	}
 
+	// Prefer annexure JSON already stored on sub-invoice.
+	storedAnnexureJSON := ""
+	if subCols, colsErr := r.loadSubInvoiceCols(ctx); colsErr == nil {
+		if subCols["annexure_json"] {
+			annexureRow := r.db1.QueryRowContext(ctx,
+				`SELECT COALESCE(annexure_json, '') FROM franchise_invoice_sub WHERE id = ? AND park = 0 LIMIT 1`,
+				subInvoiceID,
+			)
+			_ = annexureRow.Scan(&storedAnnexureJSON)
+		}
+	}
+
 	// 2. Fetch owner defaults (customer snapshot).
 	owner, err := r.fetchOwnerDefaults(ctx, ownerID)
 	if err != nil {
@@ -861,12 +937,12 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 
 	// 5b. Fetch annexure (invoice list) from the parent franchise_invoice.
 	// Store as JSON in annexure_json so the invoice print can render Annexure 1.
-	var annexureJSON string
-	if parentInvoiceID > 0 {
+	annexureJSON := strings.TrimSpace(storedAnnexureJSON)
+	if annexureJSON == "" && parentInvoiceID > 0 {
 		annexureData, annexureErr := r.GetInvoiceList(ctx, parentInvoiceID)
 		if annexureErr == nil && annexureData != nil {
-			if b, jsonErr := json.Marshal(annexureData); jsonErr == nil {
-				annexureJSON = string(b)
+			if wrapped, jsonErr := encodeAnnexureJSON("invoice_list", annexureData); jsonErr == nil {
+				annexureJSON = wrapped
 			}
 		}
 		// Non-fatal: if annexure fetch fails the invoice is still created.
