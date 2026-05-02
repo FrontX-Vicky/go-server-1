@@ -275,33 +275,74 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 		otherItems = parentItems
 	}
 
+	selectedLabel, selectedItem := extractFirstParticular(req.OtherItems)
+	if selectedLabel == "" || selectedItem == nil {
+		selectedLabel, selectedItem = extractFirstParticular(otherItems)
+	}
+	isRoyaltyItem := isRoyaltyParticular(selectedLabel)
+	transferSectionKey := transferSectionKeyFromParticular(selectedLabel)
+
 	totalSale := req.TotalSale
-	if totalSale == 0 {
+	if totalSale == 0 && isRoyaltyItem {
 		totalSale = parentTotal
 	}
 	royality := req.Royality
-	if royality == 0 {
+	if royality == 0 && isRoyaltyItem {
 		royality = parentRoyality
 	}
 	cgst := req.CGST
-	if cgst == 0 {
+	if cgst == 0 && isRoyaltyItem {
 		cgst = parentCGST
 	}
 	sgst := req.SGST
-	if sgst == 0 {
+	if sgst == 0 && isRoyaltyItem {
 		sgst = parentSGST
 	}
 	igst := req.IGST
-	if igst == 0 {
+	if igst == 0 && isRoyaltyItem {
 		igst = parentIGST
 	}
 	calcIGST := req.CalculatedIGST
-	if calcIGST == 0 {
+	if calcIGST == 0 && isRoyaltyItem {
 		calcIGST = parentCalcIGST
 	}
+
+	// For transfer items (TTOC/TFOC), align GST percentages with the parent Royalty item.
+	// This mirrors legacy behavior where transfer sub-invoices use royalty GST rates.
+	if transferSectionKey != "" && selectedItem != nil {
+		parentParticulars := parseStoredParticulars(parentItems)
+		if royaltyItem := parentParticulars["Royalty"]; royaltyItem != nil {
+			selectedItem.CGST = royaltyItem.CGST
+			selectedItem.SGST = royaltyItem.SGST
+			selectedItem.IGST = royaltyItem.IGST
+
+			cgst = roundFloat(selectedItem.Amount*selectedItem.CGST/100, 2)
+			sgst = roundFloat(selectedItem.Amount*selectedItem.SGST/100, 2)
+			igst = roundFloat(selectedItem.Amount*selectedItem.IGST/100, 2)
+			calcIGST = igst
+
+			if req.GrantTotal == 0 {
+				grantFromRates := roundFloat(selectedItem.Amount+cgst+sgst+igst, 2)
+				req.GrantTotal = grantFromRates
+			}
+
+			if selectedLabel != "" {
+				if b, err := json.Marshal(map[string]*ParticularItem{selectedLabel: selectedItem}); err == nil {
+					otherItems = string(b)
+				}
+			}
+		}
+	}
+
 	grantTotal := req.GrantTotal
 	if grantTotal == 0 {
-		grantTotal = parentGrant
+		if isRoyaltyItem {
+			grantTotal = parentGrant
+		} else if selectedItem != nil {
+			grantTotal = roundFloat(selectedItem.Amount+cgst+sgst+igst, 2)
+		} else {
+			grantTotal = parentGrant
+		}
 	}
 	proforma := req.Proforma
 	if strings.TrimSpace(proforma) == "" {
@@ -309,12 +350,26 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	}
 
 	itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount := extractSubInvoiceItemSnapshot(otherItems)
-	// Persist Annexure 1 invoice list JSON on sub-invoice so sales invoice creation can reuse it directly.
+	// Persist annexure_json on sub-invoice so sales invoice creation can reuse it directly.
 	var annexureJSON string
 	if req.ParentInvoiceID > 0 {
-		if annexureData, annexureErr := r.GetInvoiceList(ctx, req.ParentInvoiceID); annexureErr == nil && annexureData != nil {
-			if wrapped, jsonErr := encodeAnnexureJSON("invoice_list", annexureData); jsonErr == nil {
-				annexureJSON = wrapped
+		if transferSectionKey != "" {
+			if transferAnnexure, transferErr := r.GetMemberTransferAnnexure(ctx, ownerNameID, startDate, endDate); transferErr == nil && transferAnnexure != nil {
+				if section, ok := pickAnnexureSection(transferAnnexure, transferSectionKey); ok {
+					payload := map[string]any{
+						"title":    transferAnnexure.Title,
+						"sections": []AnnexureSection{section},
+					}
+					if wrapped, jsonErr := encodeAnnexureJSON("member_transfer", payload); jsonErr == nil {
+						annexureJSON = wrapped
+					}
+				}
+			}
+		} else if isRoyaltyItem {
+			if annexureData, annexureErr := r.GetInvoiceList(ctx, req.ParentInvoiceID); annexureErr == nil && annexureData != nil {
+				if wrapped, jsonErr := encodeAnnexureJSON("invoice_list", annexureData); jsonErr == nil {
+					annexureJSON = wrapped
+				}
 			}
 		}
 	}
@@ -878,6 +933,56 @@ func encodeAnnexureJSON(annexureType string, payload any) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+func extractFirstParticular(raw string) (string, *ParticularItem) {
+	if strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	var parsed map[string]map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return "", nil
+	}
+	for label, v := range parsed {
+		item := &ParticularItem{
+			Amount: toFloat(v["amount"]),
+			HSN:    toString(v["hsn"]),
+			IGST:   toFloat(v["igst"]),
+			CGST:   toFloat(v["cgst"]),
+			SGST:   toFloat(v["sgst"]),
+		}
+		return strings.TrimSpace(label), item
+	}
+	return "", nil
+}
+
+func isRoyaltyParticular(label string) bool {
+	v := strings.ToLower(strings.TrimSpace(label))
+	return v == "royalty" || v == "royality"
+}
+
+func transferSectionKeyFromParticular(label string) string {
+	v := strings.ToUpper(strings.TrimSpace(label))
+	if strings.HasPrefix(v, "TTOC") {
+		return "TTOC"
+	}
+	if strings.HasPrefix(v, "TFOC") {
+		return "TFOC"
+	}
+	return ""
+}
+
+func pickAnnexureSection(a *MemberTransferAnnexure, key string) (AnnexureSection, bool) {
+	if a == nil {
+		return AnnexureSection{}, false
+	}
+	target := strings.ToUpper(strings.TrimSpace(key))
+	for _, s := range a.Sections {
+		if strings.ToUpper(strings.TrimSpace(s.Key)) == target {
+			return s, true
+		}
+	}
+	return AnnexureSection{}, false
 }
 
 // CreateSalesInvoiceFromSub creates a full sales invoice from a sub-invoice.

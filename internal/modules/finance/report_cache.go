@@ -15,7 +15,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const franchiseeReportCacheTTL = time.Hour
+const (
+	franchiseeReportCacheTTL = time.Hour
+	reportCacheOpTimeout     = 200 * time.Millisecond
+	reportCacheInitTimeout   = 300 * time.Millisecond
+)
 
 var (
 	reportCacheOnce   sync.Once
@@ -36,11 +40,25 @@ func getReportCacheClient() *redis.Client {
 			}
 		}
 
-		reportCacheClient = redis.NewClient(&redis.Options{
-			Addr:     addr,
-			Password: os.Getenv("REDIS_PASSWORD"),
-			DB:       db,
+		client := redis.NewClient(&redis.Options{
+			Addr:         addr,
+			Password:     os.Getenv("REDIS_PASSWORD"),
+			DB:           db,
+			DialTimeout:  reportCacheOpTimeout,
+			ReadTimeout:  reportCacheOpTimeout,
+			WriteTimeout: reportCacheOpTimeout,
+			PoolTimeout:  reportCacheOpTimeout,
 		})
+
+		pingCtx, cancel := context.WithTimeout(context.Background(), reportCacheInitTimeout)
+		defer cancel()
+		if err := client.Ping(pingCtx).Err(); err != nil {
+			_ = client.Close()
+			reportCacheClient = nil
+			return
+		}
+
+		reportCacheClient = client
 	})
 
 	return reportCacheClient
