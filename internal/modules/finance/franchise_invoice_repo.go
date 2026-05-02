@@ -355,14 +355,8 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	if req.ParentInvoiceID > 0 {
 		if transferSectionKey != "" {
 			if transferAnnexure, transferErr := r.GetMemberTransferAnnexure(ctx, ownerNameID, startDate, endDate); transferErr == nil && transferAnnexure != nil {
-				if section, ok := pickAnnexureSection(transferAnnexure, transferSectionKey); ok {
-					payload := map[string]any{
-						"title":    transferAnnexure.Title,
-						"sections": []AnnexureSection{section},
-					}
-					if wrapped, jsonErr := encodeAnnexureJSON("member_transfer", payload); jsonErr == nil {
-						annexureJSON = wrapped
-					}
+				if wrapped, jsonErr := encodeAnnexureJSON("member_transfer", transferAnnexure); jsonErr == nil {
+					annexureJSON = wrapped
 				}
 			}
 		} else if isRoyaltyItem {
@@ -970,19 +964,6 @@ func transferSectionKeyFromParticular(label string) string {
 		return "TFOC"
 	}
 	return ""
-}
-
-func pickAnnexureSection(a *MemberTransferAnnexure, key string) (AnnexureSection, bool) {
-	if a == nil {
-		return AnnexureSection{}, false
-	}
-	target := strings.ToUpper(strings.TrimSpace(key))
-	for _, s := range a.Sections {
-		if strings.ToUpper(strings.TrimSpace(s.Key)) == target {
-			return s, true
-		}
-	}
-	return AnnexureSection{}, false
 }
 
 // CreateSalesInvoiceFromSub creates a full sales invoice from a sub-invoice.
