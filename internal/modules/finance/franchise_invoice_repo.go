@@ -156,7 +156,9 @@ func (r *FranchiseInvoiceRepo) GetRoyaltyShare(ctx context.Context, ownerID, rep
 		return nil, err
 	}
 
-	return nil, fmt.Errorf("royalty share not found for owner %d in r_id=%d", ownerID, reportID)
+	// No royalty-share row for this owner/report is a valid draft-init case.
+	// Return zero values so UI can proceed and user can add manual particulars/sub-invoices.
+	return &RoyaltyShare{}, nil
 }
 
 // GetTaxData fetches cgstTax, sgstTax, igstTax from branch table (DB1).
