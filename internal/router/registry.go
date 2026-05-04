@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"server_1/internal/core/config"
 	"server_1/internal/core/prism"
+	"server_1/internal/modules/communications"
 	"server_1/internal/modules/dynamicapi"
 	"server_1/internal/modules/export"
 	"server_1/internal/modules/finance"
@@ -28,6 +29,7 @@ func Build(cfg config.Config) *gin.Engine {
 
 	v1 := base.Group("/api/v1")
 	// test_items.MountRoutes(v1)
+	communications.MountRoutes(v1, prismClient, cfg)
 	dynamicapi.MountRoutes(v1, cfg.APIKeys.Dynamic, prismClient)
 	export.MountRoutes(v1, prismClient)
 	finance.MountRoutes(v1, prismClient)

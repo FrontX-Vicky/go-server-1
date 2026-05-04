@@ -23,12 +23,25 @@ type PrismConfig struct {
 	APIKey    string
 }
 
+type EmailConfig struct {
+	SMTPHost      string
+	SMTPPort      string
+	SMTPUser      string
+	SMTPPass      string
+	FromEmail     string
+	FromName      string
+	AttachmentDir string
+	WorkerPollMS  int
+	MaxAttempts   int
+}
+
 type Config struct {
 	AppEnv  string
 	Server  ServerConfig
 	Obs     Observability
 	APIKeys APIKeys
 	Prism   PrismConfig
+	Email   EmailConfig
 }
 
 type DBConfig struct {
@@ -86,6 +99,17 @@ func Load() Config {
 			BaseURL:   getenv("PRISM_API_BASE_URL", ""),
 			TimeoutMS: getenvInt("PRISM_API_TIMEOUT_MS", 5000),
 			APIKey:    getenv("PRISM_API_KEY", ""),
+		},
+		Email: EmailConfig{
+			SMTPHost:      getenv("EMAIL_SMTP_HOST", ""),
+			SMTPPort:      getenv("EMAIL_SMTP_PORT", "587"),
+			SMTPUser:      getenv("EMAIL_SMTP_USER", ""),
+			SMTPPass:      getenv("EMAIL_SMTP_PASS", ""),
+			FromEmail:     getenv("EMAIL_FROM_EMAIL", ""),
+			FromName:      getenv("EMAIL_FROM_NAME", ""),
+			AttachmentDir: getenv("EMAIL_ATTACHMENT_DIR", "/tmp/markx-email-attachments"),
+			WorkerPollMS:  getenvInt("EMAIL_WORKER_POLL_MS", 5000),
+			MaxAttempts:   getenvInt("EMAIL_MAX_ATTEMPTS", 10),
 		},
 	}
 }

@@ -5,7 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1238,7 +1243,84 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	if err = tx.Commit(); err != nil {
 		return 0, err
 	}
+	if strings.EqualFold(strings.TrimSpace(owner.SupplyTypeCode), "B2B") && masterCols["document"] {
+		if persistErr := r.persistLegacyB2BSalesInvoiceDocument(ctx, salesInvoiceID, invoiceNo); persistErr != nil {
+			log.Printf("persist legacy b2b sales invoice document failed for sales_invoice_id=%d: %v", salesInvoiceID, persistErr)
+		}
+	}
 	return salesInvoiceID, nil
+}
+
+const b2bSalesInvoiceDocumentDir = "/var/www/content/pdf/TREPL"
+
+const legacyFinanceBaseURL = "https://admin.tickleright.in"
+
+func sanitizeDocumentSegment(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "invoice"
+	}
+	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_", ":", "_")
+	return replacer.Replace(trimmed)
+}
+
+func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocument(ctx context.Context, salesInvoiceID int64, invoiceNo string) error {
+	if salesInvoiceID <= 0 || strings.TrimSpace(invoiceNo) == "" {
+		return fmt.Errorf("sales invoice id and invoice no are required")
+	}
+	if err := os.MkdirAll(b2bSalesInvoiceDocumentDir, 0o755); err != nil {
+		return fmt.Errorf("create b2b invoice document dir: %w", err)
+	}
+	pdfName := fmt.Sprintf("SalesInvoice_%s", invoiceNo)
+	query := url.Values{}
+	query.Set("test", "pdf_test")
+	query.Set("view", "1")
+	query.Set("email_body_filename", "salesInvoice")
+	query.Set("pdf_body_filename", "salesInvoice")
+	query.Set("folder_name", "sales_invoices")
+	query.Set("email_table_name", "sales_invoice_master")
+	query.Set("pdf_name", pdfName)
+	query.Set("mail", "0")
+	query.Set("table_row_id", strconv.FormatInt(salesInvoiceID, 10))
+
+	legacyURL := legacyFinanceBaseURL + "/classes/tester.php?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, legacyURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "MarkX-B2BInvoiceDocument/1.0")
+	req.Header.Set("Accept", "application/pdf,*/*")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch legacy sales invoice pdf: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("legacy sales invoice pdf returned %s", resp.Status)
+	}
+	pdfBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read legacy sales invoice pdf: %w", err)
+	}
+	if len(pdfBytes) < 4 || string(pdfBytes[:4]) != "%PDF" {
+		return fmt.Errorf("legacy response is not a PDF")
+	}
+
+	fileName := fmt.Sprintf("SalesInvoice_%s.pdf", sanitizeDocumentSegment(invoiceNo))
+	fullPath := filepath.Join(b2bSalesInvoiceDocumentDir, fileName)
+	if err := os.WriteFile(fullPath, pdfBytes, 0o644); err != nil {
+		return fmt.Errorf("write legacy sales invoice pdf: %w", err)
+	}
+
+	if _, err := r.db1.ExecContext(ctx,
+		`UPDATE sales_invoice_master SET document = ? WHERE id = ?`,
+		fullPath, salesInvoiceID,
+	); err != nil {
+		_ = os.Remove(fullPath)
+		return fmt.Errorf("update sales_invoice_master.document: %w", err)
+	}
+	return nil
 }
 
 // nullableInt returns nil (NULL) for zero values, otherwise returns the int64.
