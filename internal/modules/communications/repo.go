@@ -141,8 +141,8 @@ func (r *Repository) FindJobByIdempotencyKey(ctx context.Context, key string) (*
 	row := r.db.QueryRowContext(ctx, `SELECT
 		id, status, reference_type, reference_id, reference_label, module_key,
 		subject, body_html, body_text, to_json, cc_json, bcc_json,
-		triggered_by_user_id, triggered_by_name, triggered_by_email,
-		idempotency_key, retry_of_job_id, latest_attempt_id, COALESCE(latest_error,''),
+		COALESCE(triggered_by_user_id,''), COALESCE(triggered_by_name,''), COALESCE(triggered_by_email,''),
+		COALESCE(idempotency_key,''), retry_of_job_id, latest_attempt_id, COALESCE(latest_error,''),
 		queued_at, processing_started_at, sent_at, failed_at, created_at, updated_at
 		FROM email_jobs WHERE idempotency_key = ? LIMIT 1`, key)
 	job, err := scanJob(row)
@@ -212,8 +212,8 @@ func (r *Repository) GetJob(ctx context.Context, jobID int64) (*EmailJob, error)
 	row := r.db.QueryRowContext(ctx, `SELECT
 		id, status, reference_type, reference_id, reference_label, module_key,
 		subject, body_html, body_text, to_json, cc_json, bcc_json,
-		triggered_by_user_id, triggered_by_name, triggered_by_email,
-		idempotency_key, retry_of_job_id, latest_attempt_id, COALESCE(latest_error,''),
+		COALESCE(triggered_by_user_id,''), COALESCE(triggered_by_name,''), COALESCE(triggered_by_email,''),
+		COALESCE(idempotency_key,''), retry_of_job_id, latest_attempt_id, COALESCE(latest_error,''),
 		queued_at, processing_started_at, sent_at, failed_at, created_at, updated_at
 		FROM email_jobs WHERE id = ? LIMIT 1`, jobID)
 	job, err := scanJob(row)

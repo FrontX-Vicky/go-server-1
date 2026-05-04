@@ -421,16 +421,17 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 // ListSubInvoices returns sub-invoices for a parent invoice (DB1).
 func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoiceID int64) ([]SubInvoice, error) {
 	rows, err := r.db1.QueryContext(ctx,
-		`SELECT id, parent_invoice_id,
-		        COALESCE(invoice,''), COALESCE(invoice_date,'0000-00-00'),
-		        COALESCE(proforma,'0'), COALESCE(total_sale,0),
-		        COALESCE(royality,0), COALESCE(cgst,0), COALESCE(sgst,0),
-		        COALESCE(igst,0), COALESCE(grant_total,0), COALESCE(other_items,''),
-		        COALESCE(sales_invoice_id,0), COALESCE(sales_invoice_no,''),
-		        COALESCE(sales_invoice_status,''), COALESCE(created_at,''),
-		        COALESCE(item_name,''), COALESCE(item_hsn,''), COALESCE(item_gst_amount,0)
-		 FROM franchise_invoice_sub
-		 WHERE parent_invoice_id = ? AND park = 0
+		`SELECT s.id, s.parent_invoice_id,
+		        COALESCE(s.invoice,''), COALESCE(s.invoice_date,'0000-00-00'),
+		        COALESCE(s.proforma,'0'), COALESCE(s.total_sale,0),
+		        COALESCE(s.royality,0), COALESCE(s.cgst,0), COALESCE(s.sgst,0),
+		        COALESCE(s.igst,0), COALESCE(s.grant_total,0), COALESCE(s.other_items,''),
+		        COALESCE(s.sales_invoice_id,0), COALESCE(s.sales_invoice_no,''),
+		        COALESCE(s.sales_invoice_status,''), COALESCE(m.document,''), COALESCE(s.created_at,''),
+		        COALESCE(s.item_name,''), COALESCE(s.item_hsn,''), COALESCE(s.item_gst_amount,0)
+		 FROM franchise_invoice_sub s
+		 LEFT JOIN sales_invoice_master m ON m.id = s.sales_invoice_id
+		 WHERE s.parent_invoice_id = ? AND s.park = 0
 		 ORDER BY id DESC`,
 		parentInvoiceID,
 	)
@@ -454,7 +455,7 @@ func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoic
 			&s.Royality, &s.CGST, &s.SGST,
 			&s.IGST, &s.GrantTotal, &s.OtherItems,
 			&s.SalesInvoiceID, &s.SalesInvoiceNo,
-			&s.SalesInvoiceStatus, &s.CreatedAt,
+			&s.SalesInvoiceStatus, &s.SalesInvoiceDocument, &s.CreatedAt,
 			&itemName, &itemHSN, &itemGSTValue,
 		); err != nil {
 			return nil, err

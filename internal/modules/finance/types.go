@@ -97,6 +97,7 @@ type SubInvoice struct {
 	SalesInvoiceID   int64   `json:"sales_invoice_id"`
 	SalesInvoiceNo   string  `json:"sales_invoice_no"`
 	SalesInvoiceStatus string `json:"sales_invoice_status"`
+	SalesInvoiceDocument string `json:"sales_invoice_document"`
 	CreatedAt        string  `json:"created_at"`
 	ItemLabel        string  `json:"item_label"`
 	ItemHSN          string  `json:"item_hsn"`
