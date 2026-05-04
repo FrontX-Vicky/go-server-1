@@ -829,17 +829,25 @@ func computeInvoiceTotals(items []salesLineItem, taxMode string) (invoiceTotals,
 			t.TaxableTotal = roundFloat(t.TaxableTotal+taxable, 2)
 
 			if inter {
-				igstAmt := roundFloat(taxable*item.IGSTRate/100, 2)
-				if item.IGSTRate == 0 {
-					igstAmt = roundFloat(taxable*item.GSTRate/100, 2)
+				computed[i].CGSTRate = 0
+				computed[i].SGSTRate = 0
+				if computed[i].IGSTRate == 0 && computed[i].GSTRate > 0 {
+					computed[i].IGSTRate = computed[i].GSTRate
+				}
+				igstAmt := roundFloat(taxable*computed[i].IGSTRate/100, 2)
+				if computed[i].IGSTRate == 0 {
+					igstAmt = roundFloat(taxable*computed[i].GSTRate/100, 2)
 				}
 				computed[i].IGSTAmount = igstAmt
 				t.IGSTTotal = roundFloat(t.IGSTTotal+igstAmt, 2)
 			} else {
-				cgstAmt := roundFloat(taxable*item.CGSTRate/100, 2)
-				sgstAmt := roundFloat(taxable*item.SGSTRate/100, 2)
-				if item.CGSTRate == 0 && item.SGSTRate == 0 && item.GSTRate > 0 {
-					half := roundFloat(item.GSTRate/2, 2)
+				computed[i].IGSTRate = 0
+				cgstAmt := roundFloat(taxable*computed[i].CGSTRate/100, 2)
+				sgstAmt := roundFloat(taxable*computed[i].SGSTRate/100, 2)
+				if computed[i].CGSTRate == 0 && computed[i].SGSTRate == 0 && computed[i].GSTRate > 0 {
+					half := roundFloat(computed[i].GSTRate/2, 2)
+					computed[i].CGSTRate = half
+					computed[i].SGSTRate = half
 					cgstAmt = roundFloat(taxable*half/100, 2)
 					sgstAmt = cgstAmt
 				}
@@ -1139,8 +1147,18 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		"notes":                   owner.Notes,
 		"terms":                   owner.Terms,
 		"status":                  "draft",
-		"tax_profile_type":        "exempt",
-		"is_tax_exempt":           1,
+		"tax_profile_type": func() string {
+			if totals.TaxableTotal > 0 || totals.TotalTaxAmount > 0 {
+				return "taxable"
+			}
+			return "exempt"
+		}(),
+		"is_tax_exempt": func() int {
+			if totals.TaxableTotal > 0 || totals.TotalTaxAmount > 0 {
+				return 0
+			}
+			return 1
+		}(),
 		"currency_code":           owner.Currency,
 		"currency_rate":           1.0,
 		"subtotal_amount":         totals.Subtotal,
