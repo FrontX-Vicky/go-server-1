@@ -33,11 +33,12 @@ func NewFranchiseInvoiceRepo() *FranchiseInvoiceRepo {
 // GetOwner fetches the owner name from branch_owner_master (DB1).
 func (r *FranchiseInvoiceRepo) GetOwner(ctx context.Context, ownerID int64) (*FranchiseOwner, error) {
 	row := r.db1.QueryRowContext(ctx,
-		`SELECT id, owner_name FROM branch_owner_master WHERE id = ? AND park = 0 LIMIT 1`,
+		`SELECT id, COALESCE(owner_name,''), COALESCE(owner_contact_email,''), COALESCE(cc_email,''), COALESCE(bcc_email,'')
+		 FROM branch_owner_master WHERE id = ? AND park = 0 LIMIT 1`,
 		ownerID,
 	)
 	var o FranchiseOwner
-	if err := row.Scan(&o.ID, &o.OwnerName); err != nil {
+	if err := row.Scan(&o.ID, &o.OwnerName, &o.ContactEmail, &o.CCEmail, &o.BCCEmail); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("owner %d not found", ownerID)
 		}
@@ -1593,22 +1594,22 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 		return empty, nil
 	}
 
-	// ── Step 3: collect unique invoice_ids and contact_ids ─────────────────
+	// ── Step 3: collect unique invoice_ids ──────────────────────────────────
 	invoiceSet := map[int64]bool{}
-	contactSet := map[int64]bool{}
 	for _, t := range allTransfers {
 		invoiceSet[t.InvoiceID] = true
-		contactSet[t.ContactID] = true
 	}
 
 	// ── Step 4: invoice payment data for all invoice IDs ────────────────────
+	// Keep row-level results instead of collapsing by invoice_id so this mirrors
+	// the legacy PHP loop structure in invoiceFrenchisee.php.
 	type invoiceData struct {
 		InvoiceNo       string
 		StartDate       string
 		ServiceSessions int64
 		Amount          float64
 	}
-	invoiceMap := map[int64]invoiceData{}
+	invoiceRowsByInvoice := map[int64][]invoiceData{}
 	if len(invoiceSet) > 0 {
 		invIDs := make([]any, 0, len(invoiceSet))
 		invPh := ""
@@ -1633,14 +1634,14 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 		                ON pp.invoice_id = ii.invoice_id
 		         WHERE ii.invoice_id IN (` + invPh + `)
 		           AND ii.park = 0 AND ii.master_category_id IN (1, 2) AND ii.bid NOT IN (35)
-		         GROUP BY ii.invoice_id`
+		         ORDER BY ii.invoice_id DESC`
 		invRows, err := r.db1.QueryContext(ctx, invQ, invIDs...)
 		if err == nil {
 			for invRows.Next() {
 				var iid int64
 				var d invoiceData
 				if err := invRows.Scan(&iid, &d.InvoiceNo, &d.StartDate, &d.ServiceSessions, &d.Amount); err == nil {
-					invoiceMap[iid] = d
+					invoiceRowsByInvoice[iid] = append(invoiceRowsByInvoice[iid], d)
 				}
 			}
 			invRows.Close()
@@ -1715,107 +1716,114 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 		}
 	}
 
-	// ── Step 6: attendance counts per contact_id, action_date, to_bid ───────
-	// ── Step 6: attendance data for all contacts (with branch name) ─────────
+	// ── Step 6: attendance query helper (mirrors PHP per invoice row) ───────
 	type attRow struct {
 		Date   string
 		Bid    int64
 		Branch string
 	}
-	attByContact := map[int64][]attRow{}
-	if len(contactSet) > 0 {
-		contList := make([]any, 0, len(contactSet))
-		contPh := ""
-		for id := range contactSet {
-			contList = append(contList, id)
-			contPh += "?,"
+	loadAttendanceRows := func(contactID int64, invoiceStartDate, actionDate string) []attRow {
+		rows, err := r.db1.QueryContext(ctx,
+			`SELECT COALESCE(date,''), COALESCE(bid,0), COALESCE(branch,'')
+			 FROM attendance_cont_view
+			 WHERE contact_id = ? AND park = 0 AND date BETWEEN ? AND ?`,
+			contactID, invoiceStartDate, actionDate,
+		)
+		if err != nil {
+			return nil
 		}
-		contPh = strings.TrimSuffix(contPh, ",")
-		attQ := `SELECT contact_id, COALESCE(date,''), COALESCE(bid,0), COALESCE(branch,'')
-		         FROM attendance_cont_view
-		         WHERE contact_id IN (` + contPh + `) AND park = 0 AND date <= ?`
-		attArgs := append(contList, endDate)
-		attRows, err := r.db1.QueryContext(ctx, attQ, attArgs...)
-		if err == nil {
-			for attRows.Next() {
-				var contactID int64
-				var a attRow
-				if err := attRows.Scan(&contactID, &a.Date, &a.Bid, &a.Branch); err == nil {
-					attByContact[contactID] = append(attByContact[contactID], a)
-				}
+		defer rows.Close()
+
+		result := []attRow{}
+		for rows.Next() {
+			var a attRow
+			if err := rows.Scan(&a.Date, &a.Bid, &a.Branch); err == nil {
+				result = append(result, a)
 			}
-			attRows.Close()
 		}
+		return result
 	}
 
 	// ── Step 7: build TTOC rows (PHP check_out) ──────────────────────────────
 	// kid transferred OUT from owner's branch → owner RECEIVES money for remaining sessions
 	// online royalty from from_bid, offline from from_batch venue, check from_category_master
 	// attendance: date < action_date  OR  (date == action_date AND bid != to_bid)
-	buildTTOCRows := func(transfers []transferRow) ([]map[string]any, float64) {
+	buildTTOCRows := func(transfers []transferRow) ([]map[string]any, float64, float64) {
 		var total float64
+		var gstCreditBalance float64
 		rows := []map[string]any{}
 		for _, t := range transfers {
-			invData := invoiceMap[t.InvoiceID]
-			if invData.ServiceSessions <= 0 {
+			invoiceRows := invoiceRowsByInvoice[t.InvoiceID]
+			if len(invoiceRows) == 0 {
 				continue
 			}
-			royaltyPct := onlineRoyaltyMap[t.FromBid]
-			if t.FromCatMaster == 2 {
-				if pct, ok := offlineRoyaltyMap[t.FromBatch]; ok {
-					royaltyPct = pct
-				}
-			}
-			royaltyAmount := invData.Amount * (float64(100-royaltyPct) / 100)
-			perSession := royaltyAmount / float64(invData.ServiceSessions)
-
-			var prevCount int64
-			branchCount := map[string]int{}
-			for _, a := range attByContact[t.ContactID] {
-				if a.Date < invData.StartDate {
+			for _, invData := range invoiceRows {
+				if invData.ServiceSessions <= 0 {
 					continue
 				}
-				if a.Date < t.ActionDate {
-					prevCount++
-					branchCount[a.Branch]++
-				} else if a.Date == t.ActionDate && a.Bid != t.ToBid {
-					prevCount++
-					branchCount[a.Branch]++
+				royaltyPct := onlineRoyaltyMap[t.FromBid]
+				if t.FromCatMaster == 2 {
+					if pct, ok := offlineRoyaltyMap[t.FromBatch]; ok {
+						royaltyPct = pct
+					}
 				}
-			}
-			pendingSession := invData.ServiceSessions - prevCount
-			if pendingSession < 0 {
-				pendingSession = 0
-			}
-			forwardAmt := roundFloat(perSession*float64(pendingSession), 0)
+				royaltyAmount := invData.Amount * (float64(100-royaltyPct) / 100)
+				perSession := royaltyAmount / float64(invData.ServiceSessions)
+				attendanceRows := loadAttendanceRows(t.ContactID, invData.StartDate, t.ActionDate)
 
-			sessionsDone := []string{}
-			for branch, cnt := range branchCount {
-				sessionsDone = append(sessionsDone, fmt.Sprintf("%s - %d", branch, cnt))
-			}
+				var prevCount int64
+				branchCount := map[string]int{}
+				branchOrder := []string{}
+				for _, a := range attendanceRows {
+					if a.Date < t.ActionDate {
+						prevCount++
+						if _, ok := branchCount[a.Branch]; !ok {
+							branchOrder = append(branchOrder, a.Branch)
+						}
+						branchCount[a.Branch]++
+					} else if a.Date == t.ActionDate && a.Bid != t.ToBid {
+						prevCount++
+						if _, ok := branchCount[a.Branch]; !ok {
+							branchOrder = append(branchOrder, a.Branch)
+						}
+						branchCount[a.Branch]++
+					}
+				}
+				pendingSession := invData.ServiceSessions - prevCount
+				if pendingSession < 0 {
+					pendingSession = 0
+				}
+				forwardAmt := roundFloat(perSession*float64(pendingSession), 0)
 
-			sameOwner := 0
-			if t.FromOwnerID == t.ToOwnerID {
-				sameOwner = 1
-			} else {
-				total += forwardAmt
+				sessionsDone := []string{}
+				for _, branch := range branchOrder {
+					sessionsDone = append(sessionsDone, fmt.Sprintf("%s - %d", branch, branchCount[branch]))
+				}
+
+				sameOwner := 0
+				if t.FromOwnerID == t.ToOwnerID {
+					sameOwner = 1
+				} else {
+					total += forwardAmt
+					gstCreditBalance += forwardAmt * 0.18
+				}
+				// PHP check_out: always appends (same_owner rows show 0 amounts in UI)
+				rows = append(rows, map[string]any{
+					"invoice_no":      invData.InvoiceNo,
+					"name":            t.MemberName,
+					"from_bid":        t.FromBidName,
+					"to_bid":          t.ToBidName,
+					"total_session":   invData.ServiceSessions,
+					"amount":          roundFloat(invData.Amount, 2),
+					"share":           roundFloat(royaltyAmount, 2),
+					"pending_session": pendingSession,
+					"forward":         forwardAmt,
+					"same_owner":      sameOwner,
+					"sessions_done":   sessionsDone,
+				})
 			}
-			// PHP check_out: always appends (same_owner rows show 0 amounts)
-			rows = append(rows, map[string]any{
-				"invoice_no":      invData.InvoiceNo,
-				"name":            t.MemberName,
-				"from_bid":        t.FromBidName,
-				"to_bid":          t.ToBidName,
-				"total_session":   invData.ServiceSessions,
-				"amount":          roundFloat(invData.Amount, 2),
-				"share":           roundFloat(royaltyAmount, 2),
-				"pending_session": pendingSession,
-				"forward":         forwardAmt,
-				"same_owner":      sameOwner,
-				"sessions_done":   sessionsDone,
-			})
 		}
-		return rows, total
+		return rows, total, roundFloat(gstCreditBalance, 2)
 	}
 
 	// ── Step 8: build TFOC rows (PHP check_in) ───────────────────────────────
@@ -1823,71 +1831,78 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 	// online royalty from to_bid, offline from to_batch venue, check to_category_master
 	// attendance: date <= action_date AND bid != to_bid (prevCount)
 	// sessions_done: all records within range (PHP had bid filter commented out)
-	buildTFOCRows := func(transfers []transferRow) ([]map[string]any, float64) {
+	buildTFOCRows := func(transfers []transferRow) ([]map[string]any, float64, float64) {
 		var total float64
+		var gstCreditBalance float64
 		rows := []map[string]any{}
 		for _, t := range transfers {
-			invData := invoiceMap[t.InvoiceID]
-			if invData.ServiceSessions <= 0 {
+			invoiceRows := invoiceRowsByInvoice[t.InvoiceID]
+			if len(invoiceRows) == 0 {
 				continue
 			}
-			royaltyPct := onlineRoyaltyMap[t.ToBid]
-			if t.ToCatMaster == 2 {
-				if pct, ok := offlineRoyaltyMap[t.ToBatch]; ok {
-					royaltyPct = pct
-				}
-			}
-			royaltyAmount := invData.Amount * (float64(100-royaltyPct) / 100)
-			perSession := royaltyAmount / float64(invData.ServiceSessions)
-
-			var prevCount int64
-			branchCount := map[string]int{}
-			for _, a := range attByContact[t.ContactID] {
-				if a.Date < invData.StartDate || a.Date > t.ActionDate {
+			for _, invData := range invoiceRows {
+				if invData.ServiceSessions <= 0 {
 					continue
 				}
-				// sessions_done: all records within range (PHP had bid filter commented out)
-				branchCount[a.Branch]++
-				// prevCount: only where bid != to_bid
-				if a.Bid != t.ToBid {
-					prevCount++
+				royaltyPct := onlineRoyaltyMap[t.ToBid]
+				if t.ToCatMaster == 2 {
+					if pct, ok := offlineRoyaltyMap[t.ToBatch]; ok {
+						royaltyPct = pct
+					}
 				}
-			}
-			pendingSession := invData.ServiceSessions - prevCount
-			if pendingSession < 0 {
-				pendingSession = 0
-			}
-			forwardAmt := roundFloat(perSession*float64(pendingSession), 0)
+				royaltyAmount := invData.Amount * (float64(100-royaltyPct) / 100)
+				perSession := royaltyAmount / float64(invData.ServiceSessions)
+				attendanceRows := loadAttendanceRows(t.ContactID, invData.StartDate, t.ActionDate)
 
-			sessionsDone := []string{}
-			for branch, cnt := range branchCount {
-				sessionsDone = append(sessionsDone, fmt.Sprintf("%s - %d", branch, cnt))
-			}
+				var prevCount int64
+				branchCount := map[string]int{}
+				branchOrder := []string{}
+				for _, a := range attendanceRows {
+					if _, ok := branchCount[a.Branch]; !ok {
+						branchOrder = append(branchOrder, a.Branch)
+					}
+					branchCount[a.Branch]++
+					if a.Bid != t.ToBid {
+						prevCount++
+					}
+				}
+				pendingSession := invData.ServiceSessions - prevCount
+				if pendingSession < 0 {
+					pendingSession = 0
+				}
+				forwardAmt := roundFloat(perSession*float64(pendingSession), 0)
 
-			// PHP check_in: only appends when not same owner
-			if t.FromOwnerID == t.ToOwnerID {
-				continue
+				sessionsDone := []string{}
+				for _, branch := range branchOrder {
+					sessionsDone = append(sessionsDone, fmt.Sprintf("%s - %d", branch, branchCount[branch]))
+				}
+
+				// PHP check_in: only appends when not same owner
+				if t.FromOwnerID == t.ToOwnerID {
+					continue
+				}
+				total += forwardAmt
+				gstCreditBalance += forwardAmt * 0.18
+				rows = append(rows, map[string]any{
+					"invoice_no":      invData.InvoiceNo,
+					"name":            t.MemberName,
+					"from_bid":        t.FromBidName,
+					"to_bid":          t.ToBidName,
+					"total_session":   invData.ServiceSessions,
+					"amount":          roundFloat(invData.Amount, 2),
+					"share":           roundFloat(royaltyAmount, 2),
+					"pending_session": pendingSession,
+					"forward":         forwardAmt,
+					"same_owner":      0,
+					"sessions_done":   sessionsDone,
+				})
 			}
-			total += forwardAmt
-			rows = append(rows, map[string]any{
-				"invoice_no":      invData.InvoiceNo,
-				"name":            t.MemberName,
-				"from_bid":        t.FromBidName,
-				"to_bid":          t.ToBidName,
-				"total_session":   invData.ServiceSessions,
-				"amount":          roundFloat(invData.Amount, 2),
-				"share":           roundFloat(royaltyAmount, 2),
-				"pending_session": pendingSession,
-				"forward":         forwardAmt,
-				"same_owner":      0,
-				"sessions_done":   sessionsDone,
-			})
 		}
-		return rows, total
+		return rows, total, roundFloat(gstCreditBalance, 2)
 	}
 
-	ttocRows, ttocTotal := buildTTOCRows(ttocTransfers)
-	tfocRows, tfocTotal := buildTFOCRows(tfocTransfers)
+	ttocRows, ttocTotal, ttocGSTCredit := buildTTOCRows(ttocTransfers)
+	tfocRows, tfocTotal, tfocGSTCredit := buildTFOCRows(tfocTransfers)
 	if ttocRows == nil {
 		ttocRows = []map[string]any{}
 	}
@@ -1902,13 +1917,19 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 				Key:   "TTOC",
 				Label: "Receivable Amount",
 				Rows:  ttocRows,
-				Totals: map[string]any{"total": ttocTotal},
+				Totals: map[string]any{
+					"total":              ttocTotal,
+					"gst_credit_balance": ttocGSTCredit,
+				},
 			},
 			{
 				Key:   "TFOC",
 				Label: "Forward-able Amount",
 				Rows:  tfocRows,
-				Totals: map[string]any{"total": tfocTotal},
+				Totals: map[string]any{
+					"total":              tfocTotal,
+					"gst_credit_balance": tfocGSTCredit,
+				},
 			},
 		},
 	}, nil

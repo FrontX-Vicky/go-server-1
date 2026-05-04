@@ -5,8 +5,11 @@ import "time"
 // ── Franchise Invoice types ────────────────────────────────────────────────
 
 type FranchiseOwner struct {
-	ID        int64  `json:"id"`
-	OwnerName string `json:"owner_name"`
+	ID           int64  `json:"id"`
+	OwnerName    string `json:"owner_name"`
+	ContactEmail string `json:"contact_email"`
+	CCEmail      string `json:"cc_email"`
+	BCCEmail     string `json:"bcc_email"`
 }
 
 type ParticularItem struct {
