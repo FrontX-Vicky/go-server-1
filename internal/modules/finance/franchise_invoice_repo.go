@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -534,6 +535,33 @@ type ownerDefaults struct {
 	InvoiceCollectionMode string
 }
 
+type branchProfile struct {
+	ID                int64
+	InvoiceNameID     int64
+	OwnerID           int64
+	BranchName        string
+	BranchInvoiceName string
+	GSTNo             string
+	InvoiceAddress    string
+	InvoicePinCode    string
+	City              string
+	State             string
+	Country           string
+}
+
+type supplierProfile struct {
+	GSTIN        string
+	PAN          string
+	LegalName    string
+	AddressLine1 string
+	AddressLine2 string
+	City         string
+	State        string
+	StateCode    string
+	Country      string
+	Pincode      string
+}
+
 // salesLineItem represents a single invoice line item.
 type salesLineItem struct {
 	Description  string
@@ -871,6 +899,8 @@ func computeInvoiceTotals(items []salesLineItem, taxMode string) (invoiceTotals,
 var siMasterCols map[string]bool
 var siItemCols map[string]bool
 var subInvoiceCols map[string]bool
+var branchCols map[string]bool
+var ownerMasterCols map[string]bool
 
 func (r *FranchiseInvoiceRepo) loadSubInvoiceCols(ctx context.Context) (map[string]bool, error) {
 	if subInvoiceCols != nil {
@@ -937,6 +967,221 @@ func roundFloat(f float64, d int) float64 {
 		p *= 10
 	}
 	return float64(int(f*p+0.5)) / p
+}
+
+var gstinPattern = regexp.MustCompile(`^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$`)
+var panPattern = regexp.MustCompile(`^[A-Z]{5}[0-9]{4}[A-Z]$`)
+
+func normalizeGSTIN(value string) string {
+	v := strings.ToUpper(strings.TrimSpace(value))
+	if gstinPattern.MatchString(v) {
+		return v
+	}
+	return ""
+}
+
+func normalizePAN(value string) string {
+	v := strings.ToUpper(strings.TrimSpace(value))
+	if panPattern.MatchString(v) {
+		return v
+	}
+	return ""
+}
+
+func stateCodeFromGSTIN(gstin string) string {
+	gstin = normalizeGSTIN(gstin)
+	if len(gstin) >= 2 {
+		return gstin[:2]
+	}
+	return ""
+}
+
+func firstNonZero(values ...int64) int64 {
+	for _, v := range values {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func (r *FranchiseInvoiceRepo) loadBranchCols(ctx context.Context) (map[string]bool, error) {
+	if branchCols != nil {
+		return branchCols, nil
+	}
+	rows, err := r.db1.QueryContext(ctx, `SHOW COLUMNS FROM branch`)
+	if err != nil {
+		return nil, fmt.Errorf("SHOW COLUMNS branch: %w", err)
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var field, typ, null, key, extra string
+		var def sql.NullString
+		if err := rows.Scan(&field, &typ, &null, &key, &def, &extra); err != nil {
+			return nil, err
+		}
+		cols[field] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	branchCols = cols
+	return branchCols, nil
+}
+
+func (r *FranchiseInvoiceRepo) loadOwnerMasterCols(ctx context.Context) (map[string]bool, error) {
+	if ownerMasterCols != nil {
+		return ownerMasterCols, nil
+	}
+	rows, err := r.db1.QueryContext(ctx, `SHOW COLUMNS FROM branch_owner_master`)
+	if err != nil {
+		return nil, fmt.Errorf("SHOW COLUMNS branch_owner_master: %w", err)
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var field, typ, null, key, extra string
+		var def sql.NullString
+		if err := rows.Scan(&field, &typ, &null, &key, &def, &extra); err != nil {
+			return nil, err
+		}
+		cols[field] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ownerMasterCols = cols
+	return ownerMasterCols, nil
+}
+
+func (r *FranchiseInvoiceRepo) fetchBranchProfile(ctx context.Context, branchID int64) (*branchProfile, error) {
+	cols, err := r.loadBranchCols(ctx)
+	if err != nil {
+		return nil, err
+	}
+	exprOrDefault := func(col string, fallback string) string {
+		if cols[col] {
+			return "COALESCE(" + col + "," + fallback + ")"
+		}
+		return fallback
+	}
+	selects := []string{
+		"id",
+		exprOrDefault("branch", "''"),
+		exprOrDefault("branch_invoice_name", "''"),
+		exprOrDefault("gst_no", "''"),
+		exprOrDefault("invoice_address", "''"),
+		exprOrDefault("invoice_pin_code", "''"),
+		exprOrDefault("city", "''"),
+		exprOrDefault("state", "''"),
+		exprOrDefault("country", "'India'"),
+	}
+	if cols["invoice_name_id"] {
+		selects = append(selects, "COALESCE(invoice_name_id,0)")
+	} else {
+		selects = append(selects, "0")
+	}
+	if cols["owner_id"] {
+		selects = append(selects, "COALESCE(owner_id,0)")
+	} else {
+		selects = append(selects, "0")
+	}
+
+	row := r.db1.QueryRowContext(ctx,
+		`SELECT `+strings.Join(selects, ",")+` FROM branch WHERE id = ? LIMIT 1`,
+		branchID,
+	)
+	var b branchProfile
+	if err := row.Scan(
+		&b.ID,
+		&b.BranchName,
+		&b.BranchInvoiceName,
+		&b.GSTNo,
+		&b.InvoiceAddress,
+		&b.InvoicePinCode,
+		&b.City,
+		&b.State,
+		&b.Country,
+		&b.InvoiceNameID,
+		&b.OwnerID,
+	); err != nil {
+		return nil, fmt.Errorf("branch %d not found: %w", branchID, err)
+	}
+	return &b, nil
+}
+
+func (r *FranchiseInvoiceRepo) fetchSupplierProfile(ctx context.Context, ownerID int64) (*supplierProfile, error) {
+	if ownerID <= 0 {
+		return &supplierProfile{Country: "India"}, nil
+	}
+	cols, err := r.loadOwnerMasterCols(ctx)
+	if err != nil {
+		return nil, err
+	}
+	panExpr := `''`
+	for _, candidate := range []string{"supplier_pan", "owner_pancard", "pan", "pan_no", "pan_number", "pan_card"} {
+		if cols[candidate] {
+			panExpr = "COALESCE(" + candidate + ",'')"
+			break
+		}
+	}
+	selects := []string{
+		"COALESCE(owner_name,'')",
+		"COALESCE(owner_display_name,'')",
+		"COALESCE(owner_company_name,'')",
+		"COALESCE(owner_gstin,'')",
+		"COALESCE(owner_state,'')",
+		"COALESCE(owner_country,'India')",
+		"COALESCE(owner_billing_address,'')",
+		"COALESCE(owner_billing_city,'')",
+		"COALESCE(owner_billing_pincode,'')",
+		panExpr,
+	}
+	row := r.db1.QueryRowContext(ctx,
+		`SELECT `+strings.Join(selects, ",")+` FROM branch_owner_master WHERE id = ? AND park = 0 LIMIT 1`,
+		ownerID,
+	)
+	var ownerName, ownerDisplayName, ownerCompanyName, ownerGSTIN, ownerState, ownerCountry, billingAddress, billingCity, billingPincode, ownerPAN string
+	if err := row.Scan(
+		&ownerName,
+		&ownerDisplayName,
+		&ownerCompanyName,
+		&ownerGSTIN,
+		&ownerState,
+		&ownerCountry,
+		&billingAddress,
+		&billingCity,
+		&billingPincode,
+		&ownerPAN,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return &supplierProfile{Country: "India"}, nil
+		}
+		return nil, fmt.Errorf("fetch supplier owner profile %d: %w", ownerID, err)
+	}
+	gstin := normalizeGSTIN(ownerGSTIN)
+	return &supplierProfile{
+		GSTIN:        gstin,
+		PAN:          normalizePAN(ownerPAN),
+		LegalName:    firstNonEmpty(ownerCompanyName, ownerDisplayName, ownerName),
+		AddressLine1: strings.TrimSpace(billingAddress),
+		AddressLine2: "",
+		City:         strings.TrimSpace(billingCity),
+		State:        strings.TrimSpace(ownerState),
+		StateCode:    stateCodeFromGSTIN(gstin),
+		Country:      firstNonEmpty(ownerCountry, "India"),
+		Pincode:      strings.TrimSpace(billingPincode),
+	}, nil
 }
 
 func encodeAnnexureJSON(annexureType string, payload any) (string, error) {
@@ -1103,6 +1348,39 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	if testMode {
 		branchID = 35
 	}
+	branchProfile, err := r.fetchBranchProfile(ctx, branchID)
+	if err != nil {
+		return 0, err
+	}
+	supplierOwnerID := firstNonZero(branchProfile.InvoiceNameID, branchProfile.OwnerID)
+	supplier, err := r.fetchSupplierProfile(ctx, supplierOwnerID)
+	if err != nil {
+		return 0, err
+	}
+	if supplier.GSTIN == "" {
+		supplier.GSTIN = normalizeGSTIN(branchProfile.GSTNo)
+	}
+	if supplier.LegalName == "" {
+		supplier.LegalName = firstNonEmpty(branchProfile.BranchInvoiceName, branchProfile.BranchName)
+	}
+	if supplier.AddressLine1 == "" {
+		supplier.AddressLine1 = strings.TrimSpace(branchProfile.InvoiceAddress)
+	}
+	if supplier.City == "" {
+		supplier.City = strings.TrimSpace(branchProfile.City)
+	}
+	if supplier.State == "" {
+		supplier.State = strings.TrimSpace(branchProfile.State)
+	}
+	if supplier.Country == "" {
+		supplier.Country = firstNonEmpty(branchProfile.Country, "India")
+	}
+	if supplier.Pincode == "" {
+		supplier.Pincode = strings.TrimSpace(branchProfile.InvoicePinCode)
+	}
+	if supplier.StateCode == "" {
+		supplier.StateCode = stateCodeFromGSTIN(supplier.GSTIN)
+	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 	fields := map[string]any{
 		"branch_id":              branchID,
@@ -1126,6 +1404,9 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		"billing_context_type":   "b2b",
 		"source_type":            "franchisee_sub_invoice",
 		"source_id":              subID,
+		"document_number":        invoiceNo,
+		"document_type_code":     "INV",
+		"document_date":          invoiceDate,
 		"customer_display_name":  owner.OwnerDisplayName,
 		"customer_company_name":  owner.OwnerCompanyName,
 		"customer_gstin":         owner.OwnerGSTIN,
@@ -1141,6 +1422,34 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		"customer_contact_person": owner.ContactPerson,
 		"customer_contact_email":  owner.ContactEmail,
 		"customer_contact_phone":  owner.ContactPhone,
+		"generated_by_gstin":      supplier.GSTIN,
+		"supplier_gstin":          supplier.GSTIN,
+		"supplier_pan":            supplier.PAN,
+		"supplier_legal_name":     supplier.LegalName,
+		"supplier_address_line_1": supplier.AddressLine1,
+		"supplier_address_line_2": supplier.AddressLine2,
+		"supplier_city":           supplier.City,
+		"supplier_state":          supplier.State,
+		"supplier_state_code":     supplier.StateCode,
+		"supplier_country":        supplier.Country,
+		"supplier_pincode":        supplier.Pincode,
+		"recipient_gstin":         owner.OwnerGSTIN,
+		"recipient_name":          firstNonEmpty(owner.OwnerDisplayName, owner.OwnerCompanyName, owner.OwnerName),
+		"recipient_billing_address_line_1": owner.BillingAddress,
+		"recipient_billing_address_line_2": "",
+		"recipient_city":          owner.BillingCity,
+		"recipient_state":         owner.OwnerState,
+		"recipient_state_code":    firstNonEmpty(owner.OwnerStateCode, stateCodeFromGSTIN(owner.OwnerGSTIN)),
+		"recipient_country":       firstNonEmpty(owner.OwnerCountry, "India"),
+		"recipient_pincode":       owner.BillingPincode,
+		"shipping_name":           firstNonEmpty(owner.OwnerDisplayName, owner.OwnerCompanyName, owner.OwnerName),
+		"shipping_address_line_1": owner.ShippingAddress,
+		"shipping_address_line_2": "",
+		"shipping_city":           owner.ShippingCity,
+		"shipping_state":          owner.OwnerState,
+		"shipping_state_code":     firstNonEmpty(owner.OwnerStateCode, stateCodeFromGSTIN(owner.OwnerGSTIN)),
+		"shipping_country":        firstNonEmpty(owner.OwnerCountry, "India"),
+		"shipping_pincode":        owner.ShippingPincode,
 		"customer_currency":       owner.Currency,
 		"place_of_supply":         owner.PlaceOfSupply,
 		"supply_state_code":       owner.SupplyStateCode,
