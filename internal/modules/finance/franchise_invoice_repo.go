@@ -1054,7 +1054,11 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	}
 
 	// 4. Resolve series.
-	series, err := r.resolveFranchiseSeries(ctx, owner.SeriesConfigID, owner.InvoiceCollectionMode, testMode)
+	// Franchise sub-invoice sales invoices are always created in the B2B flow,
+	// so they should follow the company sales-invoice settings just like the
+	// legacy PHP resolver does. Owner-mapped series should not override the
+	// company default/test series in this path.
+	series, err := r.resolveFranchiseSeries(ctx, 0, "company", testMode)
 	if err != nil {
 		return 0, err
 	}
