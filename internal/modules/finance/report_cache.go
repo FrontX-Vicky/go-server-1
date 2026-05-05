@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	franchiseeReportCacheTTL = time.Hour
+	franchiseeReportCacheTTL = 24 * time.Hour
 	reportCacheOpTimeout     = 200 * time.Millisecond
 	reportCacheInitTimeout   = 300 * time.Millisecond
 )
