@@ -237,7 +237,7 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 		        COALESCE(start_date,''), COALESCE(end_date,''),
 		        COALESCE(total_sale,0), COALESCE(royality,0),
 		        COALESCE(cgst,0), COALESCE(sgst,0), COALESCE(igst,0),
-		        COALESCE(calculated_igst,0), COALESCE(grant_total,0),
+		        COALESCE(NULLIF(calculated_igst,''),0), COALESCE(grant_total,0),
 		        COALESCE(other_items,''), COALESCE(proforma,0),
 		        COALESCE(invoice_date,'0000-00-00')
 		 FROM franchise_invoice
