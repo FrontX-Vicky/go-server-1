@@ -422,6 +422,17 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 
 // ListSubInvoices returns sub-invoices for a parent invoice (DB1).
 func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoiceID int64) ([]SubInvoice, error) {
+	emailStatusExpr := `''`
+	if r.hasEmailJobsTable(ctx) {
+		emailStatusExpr = `COALESCE((
+			SELECT ej.status
+			FROM email_jobs ej
+			WHERE ej.reference_type = 'sales_invoice'
+			  AND ej.reference_id = CAST(s.sales_invoice_id AS CHAR)
+			ORDER BY ej.id DESC
+			LIMIT 1
+		),'')`
+	}
 	rows, err := r.db1.QueryContext(ctx,
 		`SELECT s.id, s.parent_invoice_id,
 		        COALESCE(s.invoice,''), COALESCE(s.invoice_date,'0000-00-00'),
@@ -429,7 +440,7 @@ func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoic
 		        COALESCE(s.royality,0), COALESCE(s.cgst,0), COALESCE(s.sgst,0),
 		        COALESCE(s.igst,0), COALESCE(s.grant_total,0), COALESCE(s.other_items,''),
 		        COALESCE(s.sales_invoice_id,0), COALESCE(s.sales_invoice_no,''),
-		        COALESCE(s.sales_invoice_status,''), COALESCE(m.document,''), COALESCE(s.created_at,''),
+		        COALESCE(s.sales_invoice_status,''), COALESCE(m.document,''), `+emailStatusExpr+`, COALESCE(s.created_at,''),
 		        COALESCE(s.item_name,''), COALESCE(s.item_hsn,''), COALESCE(s.item_gst_amount,0)
 		 FROM franchise_invoice_sub s
 		 LEFT JOIN sales_invoice_master m ON m.id = s.sales_invoice_id
@@ -457,7 +468,7 @@ func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoic
 			&s.Royality, &s.CGST, &s.SGST,
 			&s.IGST, &s.GrantTotal, &s.OtherItems,
 			&s.SalesInvoiceID, &s.SalesInvoiceNo,
-			&s.SalesInvoiceStatus, &s.SalesInvoiceDocument, &s.CreatedAt,
+			&s.SalesInvoiceStatus, &s.SalesInvoiceDocument, &s.SalesInvoiceEmailStatus, &s.CreatedAt,
 			&itemName, &itemHSN, &itemGSTValue,
 		); err != nil {
 			return nil, err
@@ -901,6 +912,7 @@ var siItemCols map[string]bool
 var subInvoiceCols map[string]bool
 var branchCols map[string]bool
 var ownerMasterCols map[string]bool
+var emailJobsTableAvailable *bool
 
 func (r *FranchiseInvoiceRepo) loadSubInvoiceCols(ctx context.Context) (map[string]bool, error) {
 	if subInvoiceCols != nil {
@@ -1062,6 +1074,20 @@ func (r *FranchiseInvoiceRepo) loadOwnerMasterCols(ctx context.Context) (map[str
 	}
 	ownerMasterCols = cols
 	return ownerMasterCols, nil
+}
+
+func (r *FranchiseInvoiceRepo) hasEmailJobsTable(ctx context.Context) bool {
+	if emailJobsTableAvailable != nil {
+		return *emailJobsTableAvailable
+	}
+	row := r.db1.QueryRowContext(ctx, `SHOW TABLES LIKE 'email_jobs'`)
+	var tableName string
+	ok := false
+	if err := row.Scan(&tableName); err == nil && strings.TrimSpace(tableName) != "" {
+		ok = true
+	}
+	emailJobsTableAvailable = &ok
+	return ok
 }
 
 func (r *FranchiseInvoiceRepo) fetchBranchProfile(ctx context.Context, branchID int64) (*branchProfile, error) {
