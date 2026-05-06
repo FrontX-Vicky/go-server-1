@@ -1,8 +1,10 @@
 package openapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -72,9 +74,9 @@ SELECT
 							END AS ` + "`sql`" + `,
 							COALESCE(fp.first_payment_amount, 0) AS first_payment_amount,
 							COALESCE(fp.first_payment_date, NULL) AS first_payment_date,
-							COALESCE(fp.pay_mode, NULL) AS pay_mode,
 							fi.invoice_id AS id,
-							fd.duration
+							fd.duration,
+							COALESCE(fp.pay_mode, NULL) AS pay_mode
 					FROM
 						pf_TickleRight_9210.inquiry i
 						LEFT JOIN pf_TickleRight_9210.contact c ON i.contact_id = c.id
@@ -202,7 +204,7 @@ SELECT
         counsellors_incentives = 1 AND park = 0
 ) OR b.type = 'COCO')`
 
-func (r *Repo) InquiryDemoFollowup(ctx context.Context) ([]map[string]any, error) {
+func (r *Repo) InquiryDemoFollowup(ctx context.Context) ([]orderedRow, error) {
 	rows, err := r.db.QueryContext(ctx, inquiryDemoFollowupSQL)
 	if err != nil {
 		return nil, err
@@ -212,7 +214,39 @@ func (r *Repo) InquiryDemoFollowup(ctx context.Context) ([]map[string]any, error
 	return scanRows(rows)
 }
 
-func scanRows(rows *sql.Rows) ([]map[string]any, error) {
+type orderedRow struct {
+	columns []string
+	values  map[string]any
+}
+
+func (r orderedRow) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+
+	for i, column := range r.columns {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+
+		key, err := json.Marshal(column)
+		if err != nil {
+			return nil, err
+		}
+		value, err := json.Marshal(r.values[column])
+		if err != nil {
+			return nil, err
+		}
+
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(value)
+	}
+
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+func scanRows(rows *sql.Rows) ([]orderedRow, error) {
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err
@@ -222,7 +256,7 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 		return nil, err
 	}
 
-	result := make([]map[string]any, 0)
+	result := make([]orderedRow, 0)
 	for rows.Next() {
 		values := make([]any, len(columns))
 		pointers := make([]any, len(columns))
@@ -238,7 +272,7 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 		for i, column := range columns {
 			row[column] = normalizeSQLValue(values[i], columnTypes[i].DatabaseTypeName())
 		}
-		result = append(result, row)
+		result = append(result, orderedRow{columns: columns, values: row})
 	}
 
 	if err := rows.Err(); err != nil {
