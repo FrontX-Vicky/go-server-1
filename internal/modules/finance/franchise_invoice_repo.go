@@ -359,6 +359,9 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	}
 
 	itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount := extractSubInvoiceItemSnapshot(otherItems)
+	if strings.TrimSpace(req.ItemLabel) != "" {
+		itemName = strings.TrimSpace(req.ItemLabel)
+	}
 	// Persist annexure_json on sub-invoice so sales invoice creation can reuse it directly.
 	var annexureJSON string
 	if req.ParentInvoiceID > 0 {
@@ -773,7 +776,7 @@ func (r *FranchiseInvoiceRepo) fetchOwnerDefaults(ctx context.Context, ownerID i
 
 // parseFranchiseLineItems decodes other_items JSON and returns sales line items.
 // Falls back to a single exempt line item using grantTotal if JSON cannot be parsed.
-func parseFranchiseLineItems(otherItems string, grantTotal float64) []salesLineItem {
+func parseFranchiseLineItems(otherItems string, grantTotal float64, preferredLabel string) []salesLineItem {
 	var decoded map[string]map[string]any
 	if otherItems != "" {
 		if err := json.Unmarshal([]byte(otherItems), &decoded); err != nil {
@@ -783,7 +786,12 @@ func parseFranchiseLineItems(otherItems string, grantTotal float64) []salesLineI
 
 	var items []salesLineItem
 	if len(decoded) > 0 {
+		usePreferredLabel := strings.TrimSpace(preferredLabel) != "" && len(decoded) == 1
 		for label, item := range decoded {
+			description := label
+			if usePreferredLabel {
+				description = strings.TrimSpace(preferredLabel)
+			}
 			amount := toFloat(item["amount"])
 			if amount == 0 {
 				continue
@@ -796,7 +804,6 @@ func parseFranchiseLineItems(otherItems string, grantTotal float64) []salesLineI
 			if gstRate > 0 {
 				taxTreatment = "taxable"
 			}
-			lineTotal := roundFloat(amount*(1+gstRate/100), 2)
 			hsn := strings.TrimSpace(fmt.Sprintf("%v", item["hsn"]))
 			if hsn == "" || hsn == "<nil>" {
 				hsn = defaultFranchiseHSN(label)
@@ -806,7 +813,7 @@ func parseFranchiseLineItems(otherItems string, grantTotal float64) []salesLineI
 				unit = "PCS"
 			}
 			items = append(items, salesLineItem{
-				Description:  label,
+				Description:  description,
 				HSN:          hsn,
 				Quantity:     1,
 				Unit:         unit,
@@ -816,7 +823,7 @@ func parseFranchiseLineItems(otherItems string, grantTotal float64) []salesLineI
 				CGSTRate:     cgstRate,
 				SGSTRate:     sgstRate,
 				IGSTRate:     igstRate,
-				LineTotal:    lineTotal,
+				LineTotal:    roundFloat(amount, 2),
 			})
 		}
 	}
@@ -825,7 +832,7 @@ func parseFranchiseLineItems(otherItems string, grantTotal float64) []salesLineI
 		// Fallback single exempt line item.
 		amt := roundFloat(grantTotal, 2)
 		items = []salesLineItem{{
-			Description:  "Franchisee invoice item",
+			Description:  firstNonEmpty(strings.TrimSpace(preferredLabel), "Franchisee invoice item"),
 			HSN:          "9997",
 			Quantity:     1,
 			Unit:         "OTH",
@@ -850,12 +857,42 @@ func defaultFranchiseHSN(label string) string {
 	}
 }
 
-// computeInvoiceTotals computes aggregate totals from line items.
-// taxMode: "intra" → cgst/sgst split; "inter" → igst only.
-func computeInvoiceTotals(items []salesLineItem, taxMode string) (invoiceTotals, []salesLineItem) {
-	taxMode = strings.ToLower(strings.TrimSpace(taxMode))
-	inter := taxMode == "inter"
+func normalizeComparableStateName(value string) string {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(v), " ")
+}
 
+func resolveFranchiseSalesTaxMode(requestedTaxMode, sellerState, sellerStateCode, buyerState, buyerStateCode string) string {
+	taxMode := strings.ToLower(strings.TrimSpace(requestedTaxMode))
+	if taxMode == "intra" || taxMode == "inter" {
+		return taxMode
+	}
+
+	if sellerStateCode != "" && buyerStateCode != "" {
+		if sellerStateCode == buyerStateCode {
+			return "intra"
+		}
+		return "inter"
+	}
+
+	normalizedSellerState := normalizeComparableStateName(sellerState)
+	normalizedBuyerState := normalizeComparableStateName(buyerState)
+	if normalizedSellerState != "" && normalizedBuyerState != "" {
+		if normalizedSellerState == normalizedBuyerState {
+			return "intra"
+		}
+		return "inter"
+	}
+
+	return "intra"
+}
+
+// computeInvoiceTotals computes aggregate totals from line items exactly as
+// they arrive from the sub-invoice payload.
+func computeInvoiceTotals(items []salesLineItem) (invoiceTotals, []salesLineItem) {
 	var t invoiceTotals
 	computed := make([]salesLineItem, len(items))
 	for i, item := range items {
@@ -866,39 +903,29 @@ func computeInvoiceTotals(items []salesLineItem, taxMode string) (invoiceTotals,
 			taxable := roundFloat(item.UnitPrice*item.Quantity, 2)
 			computed[i].TaxableAmount = taxable
 			t.TaxableTotal = roundFloat(t.TaxableTotal+taxable, 2)
-
-			if inter {
-				computed[i].CGSTRate = 0
-				computed[i].SGSTRate = 0
-				if computed[i].IGSTRate == 0 && computed[i].GSTRate > 0 {
-					computed[i].IGSTRate = computed[i].GSTRate
-				}
-				igstAmt := roundFloat(taxable*computed[i].IGSTRate/100, 2)
-				if computed[i].IGSTRate == 0 {
-					igstAmt = roundFloat(taxable*computed[i].GSTRate/100, 2)
-				}
-				computed[i].IGSTAmount = igstAmt
-				t.IGSTTotal = roundFloat(t.IGSTTotal+igstAmt, 2)
-			} else {
-				computed[i].IGSTRate = 0
-				cgstAmt := roundFloat(taxable*computed[i].CGSTRate/100, 2)
-				sgstAmt := roundFloat(taxable*computed[i].SGSTRate/100, 2)
-				if computed[i].CGSTRate == 0 && computed[i].SGSTRate == 0 && computed[i].GSTRate > 0 {
-					half := roundFloat(computed[i].GSTRate/2, 2)
-					computed[i].CGSTRate = half
-					computed[i].SGSTRate = half
-					cgstAmt = roundFloat(taxable*half/100, 2)
-					sgstAmt = cgstAmt
-				}
-				computed[i].CGSTAmount = cgstAmt
-				computed[i].SGSTAmount = sgstAmt
-				t.CGSTTotal = roundFloat(t.CGSTTotal+cgstAmt, 2)
-				t.SGSTTotal = roundFloat(t.SGSTTotal+sgstAmt, 2)
-			}
+			computed[i].GSTRate = roundFloat(computed[i].CGSTRate+computed[i].SGSTRate+computed[i].IGSTRate, 2)
+			computed[i].CGSTAmount = roundFloat(taxable*computed[i].CGSTRate/100, 2)
+			computed[i].SGSTAmount = roundFloat(taxable*computed[i].SGSTRate/100, 2)
+			computed[i].IGSTAmount = roundFloat(taxable*computed[i].IGSTRate/100, 2)
+			t.CGSTTotal = roundFloat(t.CGSTTotal+computed[i].CGSTAmount, 2)
+			t.SGSTTotal = roundFloat(t.SGSTTotal+computed[i].SGSTAmount, 2)
+			t.IGSTTotal = roundFloat(t.IGSTTotal+computed[i].IGSTAmount, 2)
 			totalTax := computed[i].CGSTAmount + computed[i].SGSTAmount + computed[i].IGSTAmount
 			computed[i].TotalTax = roundFloat(totalTax, 2)
+			computed[i].LineTotal = roundFloat(taxable+computed[i].TotalTax, 2)
 		} else {
-			t.ExemptTotal = roundFloat(t.ExemptTotal+item.UnitPrice*item.Quantity, 2)
+			exempt := roundFloat(item.UnitPrice*item.Quantity, 2)
+			computed[i].GSTRate = 0
+			computed[i].TaxableAmount = 0
+			computed[i].CGSTRate = 0
+			computed[i].SGSTRate = 0
+			computed[i].IGSTRate = 0
+			computed[i].CGSTAmount = 0
+			computed[i].SGSTAmount = 0
+			computed[i].IGSTAmount = 0
+			computed[i].TotalTax = 0
+			computed[i].LineTotal = exempt
+			t.ExemptTotal = roundFloat(t.ExemptTotal+exempt, 2)
 		}
 	}
 	t.TotalTaxAmount = roundFloat(t.CGSTTotal+t.SGSTTotal+t.IGSTTotal, 2)
@@ -1281,7 +1308,7 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	// 1. Fetch sub-invoice.
 	subRow := r.db1.QueryRowContext(ctx,
 		`SELECT id, COALESCE(parent_invoice_id,0), COALESCE(owner_name_id,0), COALESCE(invoice_date,'0000-00-00'),
-		        COALESCE(grant_total,0), COALESCE(other_items,'')
+		        COALESCE(grant_total,0), COALESCE(other_items,''), COALESCE(item_name,'')
 		 FROM franchise_invoice_sub WHERE id = ? AND park = 0`,
 		subInvoiceID,
 	)
@@ -1292,8 +1319,9 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		invoiceDate     string
 		grantTotal      float64
 		otherItems      string
+		itemName        string
 	)
-	if err := subRow.Scan(&subID, &parentInvoiceID, &ownerID, &invoiceDate, &grantTotal, &otherItems); err != nil {
+	if err := subRow.Scan(&subID, &parentInvoiceID, &ownerID, &invoiceDate, &grantTotal, &otherItems, &itemName); err != nil {
 		return 0, fmt.Errorf("sub-invoice %d not found: %w", subInvoiceID, err)
 	}
 	if invoiceDate == "" || invoiceDate == "0000-00-00" {
@@ -1334,13 +1362,12 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		return 0, err
 	}
 
-	// 5. Parse line items and compute totals.
-	lineItems := parseFranchiseLineItems(otherItems, grantTotal)
-	totals, lineItems := computeInvoiceTotals(lineItems, owner.TaxMode)
+		// 5. Parse line items.
+		lineItems := parseFranchiseLineItems(otherItems, grantTotal, itemName)
 
-	// 5b. Fetch annexure (invoice list) from the parent franchise_invoice.
-	// Store as JSON in annexure_json so the invoice print can render Annexure 1.
-	annexureJSON := strings.TrimSpace(storedAnnexureJSON)
+		// 5b. Fetch annexure (invoice list) from the parent franchise_invoice.
+		// Store as JSON in annexure_json so the invoice print can render Annexure 1.
+		annexureJSON := strings.TrimSpace(storedAnnexureJSON)
 	if annexureJSON == "" && parentInvoiceID > 0 {
 		annexureData, annexureErr := r.GetInvoiceList(ctx, parentInvoiceID)
 		if annexureErr == nil && annexureData != nil {
@@ -1351,26 +1378,9 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		// Non-fatal: if annexure fetch fails the invoice is still created.
 	}
 
-	// 6. Begin transaction.
-	tx, err := r.db1.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	// 7. Reserve invoice number.
-	invoiceNo, sequenceNo, err := r.reserveInvoiceNumber(ctx, tx, series.ID, series.Prefix, series.Suffix, series.Padding)
-	if err != nil {
-		return 0, err
-	}
-
-	// 8. Build sales_invoice_master field map.
-	// Franchise sub-invoice sales invoices are booked to bid 35 in test mode, else bid 27.
-	branchID := int64(27)
+		// 6. Resolve supplier branch profile and tax mode before computing invoice totals.
+		// Franchise sub-invoice sales invoices are booked to bid 35 in test mode, else bid 27.
+		branchID := int64(27)
 	if testMode {
 		branchID = 35
 	}
@@ -1404,10 +1414,31 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	if supplier.Pincode == "" {
 		supplier.Pincode = strings.TrimSpace(branchProfile.InvoicePinCode)
 	}
-	if supplier.StateCode == "" {
-		supplier.StateCode = stateCodeFromGSTIN(supplier.GSTIN)
-	}
-	now := time.Now().Format("2006-01-02 15:04:05")
+		if supplier.StateCode == "" {
+			supplier.StateCode = stateCodeFromGSTIN(supplier.GSTIN)
+		}
+
+		totals, lineItems := computeInvoiceTotals(lineItems)
+
+		// 7. Begin transaction.
+		tx, err := r.db1.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer func() {
+			if err != nil {
+				_ = tx.Rollback()
+			}
+		}()
+
+		// 8. Reserve invoice number.
+		invoiceNo, sequenceNo, err := r.reserveInvoiceNumber(ctx, tx, series.ID, series.Prefix, series.Suffix, series.Padding)
+		if err != nil {
+			return 0, err
+		}
+
+		// 9. Build sales_invoice_master field map.
+		now := time.Now().Format("2006-01-02 15:04:05")
 	fields := map[string]any{
 		"branch_id":              branchID,
 		"invoice_no":             invoiceNo,
@@ -1479,7 +1510,7 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		"customer_currency":       owner.Currency,
 		"place_of_supply":         owner.PlaceOfSupply,
 		"supply_state_code":       owner.SupplyStateCode,
-		"supply_type_code":        owner.SupplyTypeCode,
+			"supply_type_code":        owner.SupplyTypeCode,
 		"invoice_date":            invoiceDate,
 		"due_date":                invoiceDate,
 		"payment_terms":           owner.PaymentTerms,
@@ -1515,8 +1546,8 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		"balance_due":             totals.GrandTotal,
 		"payment_status":          "unpaid",
 		"park":                    0,
-		"created_at":              now,
-	}
+			"created_at":              now,
+		}
 	// Store annexure rows if we fetched them successfully.
 	if annexureJSON != "" && masterCols["annexure_json"] {
 		fields["annexure_json"] = annexureJSON
@@ -1546,29 +1577,36 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 
 	// 10. Insert line items (if table/columns exist).
 	if len(itemCols) > 0 {
-		for _, item := range lineItems {
+		for index, item := range lineItems {
 			itemFields := map[string]any{
-				"invoice_id":    salesInvoiceID,
-				"description":   item.Description,
-				"hsn_sac":       item.HSN,
-				"quantity":      item.Quantity,
-				"unit":          item.Unit,
-				"unit_price":    item.UnitPrice,
-				"discount_type": "amount",
+				"invoice_id":       salesInvoiceID,
+				"line_order":       index + 1,
+				"description":      item.Description,
+				"hsn_sac":          item.HSN,
+				"quantity":         item.Quantity,
+				"unit":             item.Unit,
+				"unit_price":       item.UnitPrice,
+				"discount_type":    "amount",
 				"discount_value": 0.0,
-				"tax_treatment": item.TaxTreatment,
-				"gst_rate":      item.GSTRate,
-				"cgst_rate":     item.CGSTRate,
-				"sgst_rate":     item.SGSTRate,
-				"igst_rate":     item.IGSTRate,
-				"taxable_amount": item.TaxableAmount,
-				"cgst_amount":   item.CGSTAmount,
-				"sgst_amount":   item.SGSTAmount,
-				"igst_amount":   item.IGSTAmount,
-				"total_tax":     item.TotalTax,
-				"line_total":    item.LineTotal,
-				"park":          0,
-				"created_at":    now,
+				"discount_amount":  0.0,
+				"tax_treatment":    item.TaxTreatment,
+				"gst_rate":         item.GSTRate,
+				"tax_rate":         item.GSTRate,
+				"taxable_value":    item.TaxableAmount,
+				"taxable_amount":   item.TaxableAmount,
+				"cgst_rate":        item.CGSTRate,
+				"sgst_rate":        item.SGSTRate,
+				"igst_rate":        item.IGSTRate,
+				"cgst_amount":      item.CGSTAmount,
+				"sgst_amount":      item.SGSTAmount,
+				"igst_amount":      item.IGSTAmount,
+				"tax_amount":       item.TotalTax,
+				"total_tax":        item.TotalTax,
+				"other_charges":    0.0,
+				"line_total":       item.LineTotal,
+				"total_amount":     item.LineTotal,
+				"park":             0,
+				"created_at":       now,
 			}
 			iCols := []string{}
 			iVals := []any{}

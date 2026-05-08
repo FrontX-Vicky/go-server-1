@@ -121,6 +121,7 @@ type CreateSubInvoiceRequest struct {
 	CalculatedIGST  float64 `json:"calculated_igst"`
 	GrantTotal      float64 `json:"grant_total"`
 	OtherItems      string  `json:"other_items"`
+	ItemLabel       string  `json:"item_label"`
 }
 
 type AnnexureSection struct {
