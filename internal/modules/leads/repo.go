@@ -615,14 +615,15 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 	var totalSQL, totalHOT, totalWARM, totalCOLD int64
 	var totalReinquiries int64
 	for _, row := range rows {
-		campaign := normalizeString(row["primary_campaign_name"])
-		if campaign == "" {
-			campaign = "Unknown"
+		campaignName := normalizeString(row["campaign_name"])
+		isUndefinedCampaign := campaignName == "" || strings.EqualFold(campaignName, "Undefined")
+		if isUndefinedCampaign {
+			campaignName = "Undefined"
 		}
 		sourceID := toInt64(row["primary_source_id"])
 		sourceName := normalizeString(row["primary_source"])
 		platform := platformForSource(sourceID, sourceName)
-		key := campaignKey{Platform: platform, Name: campaign}
+		key := campaignKey{Platform: platform, Name: campaignName}
 
 		agg := aggregates[key]
 		if agg == nil {
