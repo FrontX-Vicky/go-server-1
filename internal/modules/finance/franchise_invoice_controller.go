@@ -208,6 +208,34 @@ func (ctl *FranchiseInvoiceController) CreateSalesInvoice(c *gin.Context) {
 	httpx.OK(c, gin.H{"data": salesID, "message": "Sales invoice created successfully"})
 }
 
+// RegenerateSalesInvoiceDocument handles POST /finance/franchise-invoice/sales-invoice-document
+func (ctl *FranchiseInvoiceController) RegenerateSalesInvoiceDocument(c *gin.Context) {
+	var req RegenerateSalesInvoiceDocumentRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.SalesInvoiceID <= 0 {
+		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "valid sales_invoice_id is required"})
+		return
+	}
+
+	attachmentPath, salesInvoiceNo, err := ctl.Repo.RegenerateSalesInvoiceDocument(
+		c.Request.Context(),
+		req.SalesInvoiceID,
+		req.SalesInvoiceNo,
+	)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	httpx.OK(c, gin.H{
+		"data": RegenerateSalesInvoiceDocumentResponse{
+			SalesInvoiceID: req.SalesInvoiceID,
+			SalesInvoiceNo: salesInvoiceNo,
+			AttachmentPath: attachmentPath,
+		},
+		"message": "Sales invoice document regenerated successfully",
+	})
+}
+
 // GetMemberTransferAnnexure handles GET /finance/franchise-invoice/annexure
 func (ctl *FranchiseInvoiceController) GetMemberTransferAnnexure(c *gin.Context) {
 	ownerID, err := parseOwnerID(c)

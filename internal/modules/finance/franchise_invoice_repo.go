@@ -1641,7 +1641,7 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		return 0, err
 	}
 	if strings.EqualFold(strings.TrimSpace(owner.SupplyTypeCode), "B2B") && masterCols["document"] {
-		if persistErr := r.persistLegacyB2BSalesInvoiceDocument(ctx, salesInvoiceID, invoiceNo); persistErr != nil {
+		if _, persistErr := r.persistLegacyB2BSalesInvoiceDocument(ctx, salesInvoiceID, invoiceNo); persistErr != nil {
 			log.Printf("persist legacy b2b sales invoice document failed for sales_invoice_id=%d: %v", salesInvoiceID, persistErr)
 		}
 	}
@@ -1661,12 +1661,16 @@ func sanitizeDocumentSegment(value string) string {
 	return replacer.Replace(trimmed)
 }
 
-func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocument(ctx context.Context, salesInvoiceID int64, invoiceNo string) error {
+func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocument(ctx context.Context, salesInvoiceID int64, invoiceNo string) (string, error) {
+	return r.persistLegacyB2BSalesInvoiceDocumentWithMode(ctx, salesInvoiceID, invoiceNo, false)
+}
+
+func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocumentWithMode(ctx context.Context, salesInvoiceID int64, invoiceNo string, revisioned bool) (string, error) {
 	if salesInvoiceID <= 0 || strings.TrimSpace(invoiceNo) == "" {
-		return fmt.Errorf("sales invoice id and invoice no are required")
+		return "", fmt.Errorf("sales invoice id and invoice no are required")
 	}
 	if err := os.MkdirAll(b2bSalesInvoiceDocumentDir, 0o755); err != nil {
-		return fmt.Errorf("create b2b invoice document dir: %w", err)
+		return "", fmt.Errorf("create b2b invoice document dir: %w", err)
 	}
 	pdfName := fmt.Sprintf("SalesInvoice_%s", invoiceNo)
 	query := url.Values{}
@@ -1683,31 +1687,38 @@ func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocument(ctx context.
 	legacyURL := legacyFinanceBaseURL + "/classes/tester.php?" + query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, legacyURL, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("User-Agent", "MarkX-B2BInvoiceDocument/1.0")
 	req.Header.Set("Accept", "application/pdf,*/*")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch legacy sales invoice pdf: %w", err)
+		return "", fmt.Errorf("fetch legacy sales invoice pdf: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("legacy sales invoice pdf returned %s", resp.Status)
+		return "", fmt.Errorf("legacy sales invoice pdf returned %s", resp.Status)
 	}
 	pdfBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read legacy sales invoice pdf: %w", err)
+		return "", fmt.Errorf("read legacy sales invoice pdf: %w", err)
 	}
 	if len(pdfBytes) < 4 || string(pdfBytes[:4]) != "%PDF" {
-		return fmt.Errorf("legacy response is not a PDF")
+		return "", fmt.Errorf("legacy response is not a PDF")
 	}
 
 	fileName := fmt.Sprintf("SalesInvoice_%s.pdf", sanitizeDocumentSegment(invoiceNo))
+	if revisioned {
+		fileName = fmt.Sprintf(
+			"SalesInvoice_%s_rev_%s.pdf",
+			sanitizeDocumentSegment(invoiceNo),
+			time.Now().Format("20060102_150405"),
+		)
+	}
 	fullPath := filepath.Join(b2bSalesInvoiceDocumentDir, fileName)
 	if err := os.WriteFile(fullPath, pdfBytes, 0o644); err != nil {
-		return fmt.Errorf("write legacy sales invoice pdf: %w", err)
+		return "", fmt.Errorf("write legacy sales invoice pdf: %w", err)
 	}
 
 	if _, err := r.db1.ExecContext(ctx,
@@ -1715,9 +1726,48 @@ func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocument(ctx context.
 		fullPath, salesInvoiceID,
 	); err != nil {
 		_ = os.Remove(fullPath)
-		return fmt.Errorf("update sales_invoice_master.document: %w", err)
+		return "", fmt.Errorf("update sales_invoice_master.document: %w", err)
 	}
-	return nil
+	return fullPath, nil
+}
+
+func (r *FranchiseInvoiceRepo) GetSalesInvoiceNumber(ctx context.Context, salesInvoiceID int64) (string, error) {
+	if salesInvoiceID <= 0 {
+		return "", fmt.Errorf("valid sales invoice id is required")
+	}
+	row := r.db1.QueryRowContext(
+		ctx,
+		`SELECT COALESCE(invoice_no,'') FROM sales_invoice_master WHERE id = ? LIMIT 1`,
+		salesInvoiceID,
+	)
+	var invoiceNo string
+	if err := row.Scan(&invoiceNo); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("sales invoice %d not found", salesInvoiceID)
+		}
+		return "", fmt.Errorf("fetch sales invoice no: %w", err)
+	}
+	invoiceNo = strings.TrimSpace(invoiceNo)
+	if invoiceNo == "" {
+		return "", fmt.Errorf("sales invoice %d has empty invoice_no", salesInvoiceID)
+	}
+	return invoiceNo, nil
+}
+
+func (r *FranchiseInvoiceRepo) RegenerateSalesInvoiceDocument(ctx context.Context, salesInvoiceID int64, invoiceNo string) (string, string, error) {
+	resolvedInvoiceNo := strings.TrimSpace(invoiceNo)
+	if resolvedInvoiceNo == "" {
+		var err error
+		resolvedInvoiceNo, err = r.GetSalesInvoiceNumber(ctx, salesInvoiceID)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	attachmentPath, err := r.persistLegacyB2BSalesInvoiceDocumentWithMode(ctx, salesInvoiceID, resolvedInvoiceNo, true)
+	if err != nil {
+		return "", "", err
+	}
+	return attachmentPath, resolvedInvoiceNo, nil
 }
 
 // nullableInt returns nil (NULL) for zero values, otherwise returns the int64.

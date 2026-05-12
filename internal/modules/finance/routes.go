@@ -22,6 +22,7 @@ func MountRoutes(v1 *gin.RouterGroup, checker prism.Checker) {
 	invG.POST("/sub-invoice", inv.CreateSubInvoice)
 	invG.DELETE("/sub-invoice", inv.DeleteSubInvoice)
 	invG.POST("/sales-invoice", inv.CreateSalesInvoice)
+	invG.POST("/sales-invoice-document", inv.RegenerateSalesInvoiceDocument)
 	invG.GET("/annexure", inv.GetMemberTransferAnnexure)
 	invG.GET("/invoice-list", inv.GetInvoiceList)
 }

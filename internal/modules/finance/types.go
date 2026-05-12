@@ -124,6 +124,17 @@ type CreateSubInvoiceRequest struct {
 	ItemLabel       string  `json:"item_label"`
 }
 
+type RegenerateSalesInvoiceDocumentRequest struct {
+	SalesInvoiceID int64  `json:"sales_invoice_id"`
+	SalesInvoiceNo string `json:"sales_invoice_no"`
+}
+
+type RegenerateSalesInvoiceDocumentResponse struct {
+	SalesInvoiceID int64  `json:"sales_invoice_id"`
+	SalesInvoiceNo string `json:"sales_invoice_no"`
+	AttachmentPath string `json:"attachment_path"`
+}
+
 type AnnexureSection struct {
 	Key    string         `json:"key"`
 	Label  string         `json:"label"`
