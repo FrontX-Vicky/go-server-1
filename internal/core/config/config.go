@@ -17,11 +17,31 @@ type Observability struct {
 	Prometheus bool
 }
 
+type PrismConfig struct {
+	BaseURL   string
+	TimeoutMS int
+	APIKey    string
+}
+
+type EmailConfig struct {
+	SMTPHost      string
+	SMTPPort      string
+	SMTPUser      string
+	SMTPPass      string
+	FromEmail     string
+	FromName      string
+	AttachmentDir string
+	WorkerPollMS  int
+	MaxAttempts   int
+}
+
 type Config struct {
 	AppEnv  string
 	Server  ServerConfig
 	Obs     Observability
 	APIKeys APIKeys
+	Prism   PrismConfig
+	Email   EmailConfig
 }
 
 type DBConfig struct {
@@ -48,6 +68,17 @@ func getenv(k, def string) string {
 	return def
 }
 
+func getenvInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		var parsed int
+		_, err := fmt.Sscanf(v, "%d", &parsed)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return def
+}
+
 func Load() Config {
 	return Config{
 		AppEnv: getenv("APP_ENV", "dev"),
@@ -62,12 +93,30 @@ func Load() Config {
 		},
 		APIKeys: APIKeys{
 			Dynamic: getenv("DYNAMIC_API_KEY", ""),
+			Open:    getenv("OPEN_API_KEY", ""),
+		},
+		Prism: PrismConfig{
+			BaseURL:   getenv("PRISM_API_BASE_URL", ""),
+			TimeoutMS: getenvInt("PRISM_API_TIMEOUT_MS", 5000),
+			APIKey:    getenv("PRISM_API_KEY", ""),
+		},
+		Email: EmailConfig{
+			SMTPHost:      getenv("EMAIL_SMTP_HOST", ""),
+			SMTPPort:      getenv("EMAIL_SMTP_PORT", "587"),
+			SMTPUser:      getenv("EMAIL_SMTP_USER", ""),
+			SMTPPass:      getenv("EMAIL_SMTP_PASS", ""),
+			FromEmail:     getenv("EMAIL_FROM_EMAIL", ""),
+			FromName:      getenv("EMAIL_FROM_NAME", ""),
+			AttachmentDir: getenv("EMAIL_ATTACHMENT_DIR", "/tmp/markx-email-attachments"),
+			WorkerPollMS:  getenvInt("EMAIL_WORKER_POLL_MS", 5000),
+			MaxAttempts:   getenvInt("EMAIL_MAX_ATTEMPTS", 10),
 		},
 	}
 }
 
 type APIKeys struct {
 	Dynamic string
+	Open    string
 }
 
 // DB_NAMES=DB1,DB2
@@ -97,6 +146,6 @@ func DBConfigFromPrefix(prefix string) DBConfig {
 		User:   get("USER", ""),
 		Pass:   get("PASS", ""),
 		Name:   get("NAME", ""),
-		Params: get("PARAMS", "charset=utf8mb4&parseTime=True&loc=Local"),
+		Params: get("PARAMS", "charset=utf8mb4&parseTime=True&loc=Local&checkConnLiveness=true&interpolateParams=true&timeout=30s&readTimeout=60s&writeTimeout=60s"),
 	}
 }

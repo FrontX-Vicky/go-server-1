@@ -183,19 +183,19 @@ func (r *Repo) GetReportResponse(ctx context.Context, id int64, opts map[string]
 }
 
 type Repo struct {
-	db1 *sql.DB
-	db2 *sql.DB
+	db1 *db.SQL
+	db2 *db.SQL
 }
 
 func NewRepo() *Repo {
 	return &Repo{
-		db1: db.DB("DB1"),
-		db2: db.DB("DB2"),
+		db1: db.DBx("DB1"),
+		db2: db.DBx("DB2"),
 	}
 }
 
 // choose picks a DB by name; mirrors test_items behavior
-func (r *Repo) choose(name string) *sql.DB {
+func (r *Repo) choose(name string) *db.SQL {
 	if name == "DB2" {
 		return r.db2
 	}
@@ -356,6 +356,7 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 	groupby, _ := opts["groupby"].(string)
 	limit, _ := opts["limit"].(string)
 	offset, _ := opts["offset"].(string)
+	disableOrder, _ := opts["disable_order"].(bool)
 	// orderby: []map[string]string or string
 	orderby, _ := opts["orderby"].([]map[string]string)
 
@@ -378,11 +379,15 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 
 	var query string
 	if meta.DynamicReport {
-		// fetch view definition
 		var view string
-		err := r.db1.QueryRowContext(ctx, `SELECT view FROM report_view_table WHERE r_id = ?`, id).Scan(&view)
-		if err != nil {
-			return "", fmt.Errorf("fetch view: %w", err)
+		if override, ok := reportViewOverride(id); ok {
+			view = override
+		} else {
+			// fetch view definition
+			err := r.db1.QueryRowContext(ctx, `SELECT view FROM report_view_table WHERE r_id = ?`, id).Scan(&view)
+			if err != nil {
+				return "", fmt.Errorf("fetch view: %w", err)
+			}
 		}
 		// replace placeholders
 		view = strings.ReplaceAll(view, "#sdate", startDate)
@@ -450,7 +455,9 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 
 	// ORDER BY
 	orderByStr := ""
-	if len(orderby) > 0 {
+	if disableOrder {
+		// caller explicitly disabled ordering
+	} else if len(orderby) > 0 {
 		parts := []string{}
 		for _, ord := range orderby {
 			for k, v := range ord {
@@ -460,7 +467,7 @@ func (r *Repo) BuildReportQuery(ctx context.Context, id int64, opts map[string]a
 		parts = append(parts, "id DESC")
 		orderByStr = strings.Join(parts, ", ")
 	} else {
-		// system order by
+		// system order by (fallback from report_order table)
 		sysParts := []string{}
 		sysRows, err := r.db1.QueryContext(ctx, `SELECT col, order_by FROM report_order WHERE report_id = ?`, id)
 		if err == nil {
@@ -529,9 +536,15 @@ func (r *Repo) RunReportQuery(ctx context.Context, id int64, opts map[string]any
 	if err != nil {
 		return nil, "", err
 	}
-	rows, err := r.db1.QueryContext(ctx, query)
+	dbName, _ := opts["db_name"].(string)
+	rows, err := r.choose(dbName).QueryContext(ctx, query)
+	if err != nil && strings.EqualFold(strings.TrimSpace(dbName), "DB2") {
+		// Override queries are fully qualified — retry on DB1 for any DB2 failure
+		// (missing table, invalid connection, timeout, etc.)
+		rows, err = r.db1.QueryContext(ctx, query)
+	}
 	if err != nil {
-		return nil, query, err
+		return nil, query, fmt.Errorf("report %d query failed: %w", id, err)
 	}
 	defer rows.Close()
 
@@ -565,6 +578,59 @@ func (r *Repo) RunReportQuery(ctx context.Context, id int64, opts map[string]any
 		return nil, query, err
 	}
 	return result, query, nil
+}
+
+// RunReportAggregates returns total row count and optional total sum for a report
+// without materializing all rows in Go.
+func (r *Repo) RunReportAggregates(ctx context.Context, id int64, opts map[string]any, totalColumn string) (int, float64, string, error) {
+	aggOpts := map[string]any{}
+	for k, v := range opts {
+		aggOpts[k] = v
+	}
+	delete(aggOpts, "limit")
+	delete(aggOpts, "offset")
+	aggOpts["disable_order"] = true
+
+	baseQuery, err := r.BuildReportQuery(ctx, id, aggOpts)
+	if err != nil {
+		return 0, 0, "", err
+	}
+
+	col := strings.TrimSpace(totalColumn)
+	useSum := col != "" && reportSimpleIdentPattern.MatchString(col)
+
+	aggQuery := "SELECT COUNT(1) AS total_count"
+	if useSum {
+		aggQuery += fmt.Sprintf(", COALESCE(SUM(CAST(x.`%s` AS DECIMAL(20,2))), 0) AS overall_total", col)
+	}
+	aggQuery += fmt.Sprintf(" FROM (%s) AS x", baseQuery)
+
+	dbName, _ := opts["db_name"].(string)
+	dbConn := r.choose(dbName)
+
+	var totalCount int
+	var overallTotal float64
+
+	if useSum {
+		err = dbConn.QueryRowContext(ctx, aggQuery).Scan(&totalCount, &overallTotal)
+	} else {
+		err = dbConn.QueryRowContext(ctx, aggQuery).Scan(&totalCount)
+	}
+
+	if err != nil && strings.EqualFold(strings.TrimSpace(dbName), "DB2") {
+		// Retry on DB1 for any DB2 failure — override queries are fully qualified.
+		if useSum {
+			err = r.db1.QueryRowContext(ctx, aggQuery).Scan(&totalCount, &overallTotal)
+		} else {
+			err = r.db1.QueryRowContext(ctx, aggQuery).Scan(&totalCount)
+		}
+	}
+
+	if err != nil {
+		return 0, 0, aggQuery, err
+	}
+
+	return totalCount, overallTotal, aggQuery, nil
 }
 
 // parsePositiveInt converts a string to a positive int with an upper bound; if empty returns the fallback.
@@ -609,4 +675,12 @@ func isSafeOrderBy(ob string) bool {
 	return true
 }
 
+func reportViewOverride(id int64) (string, bool) {
+	switch id {
+	default:
+		return "", false
+	}
+}
+
 var reportIdentPattern = regexp.MustCompile(`^[A-Za-z0-9_\.]+$`)
+var reportSimpleIdentPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)

@@ -1,8 +1,6 @@
 package dynamicapi
 
 import (
-	"crypto/subtle"
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,23 +9,16 @@ import (
 )
 
 type Controller struct {
-	Repo   *Repo
-	APIKey string
+	Repo *Repo
 }
 
-func NewController(repo *Repo, apiKey string) *Controller {
+func NewController(repo *Repo) *Controller {
 	return &Controller{
-		Repo:   repo,
-		APIKey: apiKey,
+		Repo: repo,
 	}
 }
 
 func (ctl *Controller) Fetch(c *gin.Context) {
-	if err := ctl.authorize(c); err != nil {
-		httpx.Fail(c, http.StatusUnauthorized, gin.H{"error": gin.H{"message": err.Error()}})
-		return
-	}
-
 	var req QueryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
@@ -60,18 +51,4 @@ func (ctl *Controller) Fetch(c *gin.Context) {
 	}
 
 	httpx.OK(c, response)
-}
-
-func (ctl *Controller) authorize(c *gin.Context) error {
-	if ctl.APIKey == "" {
-		return nil
-	}
-	headerKey := c.GetHeader("X-API-Key")
-	if headerKey == "" {
-		return errors.New("missing API key")
-	}
-	if subtle.ConstantTimeCompare([]byte(headerKey), []byte(ctl.APIKey)) != 1 {
-		return errors.New("invalid API key")
-	}
-	return nil
 }

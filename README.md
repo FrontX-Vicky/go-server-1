@@ -67,6 +67,7 @@ APP_ENV=dev
 SERVER_ADDR=127.0.0.1
 SERVER_PORT=5000
 BASE_PATH=/
+OPEN_API_KEY=change-me
 
 # register multiple DBs you want available in code
 DB_NAMES=DB1,DB2
@@ -110,6 +111,13 @@ curl http://127.0.0.1:5000/api/v1/items
 - `GET    /api/v1/items/:id`
 - `PUT    /api/v1/items/:id    {"name":"New Name","status":0}`
 - `DELETE /api/v1/items/:id`
+
+### Open API endpoints
+- Public, no key: `GET /api/v1/open/public/health`
+- API key protected: `GET /api/v1/open/key/inquiry-demo-followup`
+- Legacy-friendly alias: `GET /api/v1/open/key/inquiry_demo_followup`
+
+Protected open APIs require either `X-API-Key: <OPEN_API_KEY>` or `Authorization: Bearer <OPEN_API_KEY>`.
 
 **Error behaviour:** no migrations, no schema checks. If tables are missing, responses include real MySQL errors (e.g., *Error 1146: Table 'appdb.items' doesn't exist*). Only `sql.ErrNoRows` becomes **404 Not Found**.
 
@@ -197,4 +205,3 @@ If fronted by Nginx, map `/go` → `127.0.0.1:5000` and keep buffering on for JS
 - Add your real modules (controllers + services + repos).
 - Wire WebSockets under `internal/modules/ws` and mount at `/api/v1/ws`.
 - Add Redis Stream listeners for DB change events (project already structured for it).
-
