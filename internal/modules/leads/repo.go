@@ -22,6 +22,7 @@ SELECT
 FROM inquiry_structured_report_view`
 
 var metaSourceIDs = []string{"22", "23"}
+var googleSourceIDs = []string{"27"}
 
 // var metaSourceNames = map[string]struct{}{
 // 	"Instagram Ad Form": {},
@@ -548,9 +549,9 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 	}
 
 	baseFilters := removeDateFilters(filters)
-	metaFilters := withMetaSourceFilter(baseFilters)
+	sourceFilters := withCampaignPerformanceSourceFilter(baseFilters)
 
-	filterWithDates := applyDateRange(metaFilters, dr.Start, dr.End)
+	filterWithDates := applyDateRange(sourceFilters, dr.Start, dr.End)
 	leadsQuery, leadArgs, err := buildQuery(filterWithDates, false)
 	if err != nil {
 		return nil, err
@@ -608,7 +609,7 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		coldByReason map[string]int64
 	}
 
-	aggregates := make(map[string]*campaignAggregate)
+	aggregates := make(map[campaignKey]*campaignAggregate)
 	var totalCounts summaryCounts
 	var totalRevenue float64
 	var totalSQL, totalHOT, totalWARM, totalCOLD int64
@@ -618,11 +619,15 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		if campaign == "" {
 			campaign = "Unknown"
 		}
+		sourceID := toInt64(row["primary_source_id"])
+		sourceName := normalizeString(row["primary_source"])
+		platform := platformForSource(sourceID, sourceName)
+		key := campaignKey{Platform: platform, Name: campaign}
 
-		agg := aggregates[campaign]
+		agg := aggregates[key]
 		if agg == nil {
 			agg = &campaignAggregate{coldByReason: make(map[string]int64)}
-			aggregates[campaign] = agg
+			aggregates[key] = agg
 		}
 		accumulateCounts(&agg.counts, row)
 		agg.revenue += toFloat(row["payment"])
@@ -652,26 +657,31 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 		totalRevenue += toFloat(row["payment"])
 	}
 
-	campaignNames := make([]string, 0, len(aggregates))
-	for name := range aggregates {
-		campaignNames = append(campaignNames, name)
+	campaignKeys := make([]campaignKey, 0, len(aggregates))
+	for key := range aggregates {
+		campaignKeys = append(campaignKeys, key)
 	}
-	sort.Slice(campaignNames, func(i, j int) bool {
-		a := aggregates[campaignNames[i]].counts.TotalLeads
-		b := aggregates[campaignNames[j]].counts.TotalLeads
+	sort.Slice(campaignKeys, func(i, j int) bool {
+		a := aggregates[campaignKeys[i]].counts.TotalLeads
+		b := aggregates[campaignKeys[j]].counts.TotalLeads
 		if a == b {
-			return campaignNames[i] < campaignNames[j]
+			if campaignKeys[i].Name == campaignKeys[j].Name {
+				return campaignKeys[i].Platform < campaignKeys[j].Platform
+			}
+			return campaignKeys[i].Name < campaignKeys[j].Name
 		}
 		return a > b
 	})
 
-	rowsOut := make([]CampaignRow, 0, len(campaignNames))
+	rowsOut := make([]CampaignRow, 0, len(campaignKeys))
 	totalSpendAssigned := 0.0
-	for _, campaignName := range campaignNames {
-		agg := aggregates[campaignName]
+	for _, key := range campaignKeys {
+		agg := aggregates[key]
 		counts := agg.counts
-		totalCampaignSpend := spendMap[campaignName]
-		spend := totalCampaignSpend
+		spend := 0.0
+		if strings.EqualFold(key.Platform, "Meta") {
+			spend = spendMap[key.Name]
+		}
 		totalSpendAssigned += spend
 
 		attPercent := rate(counts.OrientationAttendance, counts.OrientationBookings)
@@ -692,11 +702,18 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			})
 		}
 
+		reinquiries := int64(0)
+		if strings.EqualFold(key.Platform, "Meta") {
+			reinquiries = reinquiryByCampaign[key.Name]
+			totalReinquiries += reinquiries
+		}
+
 		rowsOut = append(rowsOut, CampaignRow{
-			CampaignName:             campaignName,
+			Platform:                 key.Platform,
+			CampaignName:             key.Name,
 			Objective:                "Leads",
 			Leads:                    makeCountCell(counts.TotalLeads),
-			Reinquiries:              makeCountCell(reinquiryByCampaign[campaignName]),
+			Reinquiries:              makeCountCell(reinquiries),
 			OrientationAttendance:    makeCountCell(counts.OrientationAttendance),
 			Enrollments:              makeCountCell(counts.Enrollments),
 			Spend:                    currencyCell(spend),
@@ -712,8 +729,6 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			COLD:                     makeCountCell(agg.coldCount),
 			ColdBreakdown:            breakdown,
 		})
-
-		totalReinquiries += reinquiryByCampaign[campaignName]
 	}
 
 	return &CampaignPerformance{
@@ -1329,6 +1344,48 @@ func withMetaSourceFilter(filters [][]string) [][]string {
 	return out
 }
 
+func withCampaignPerformanceSourceFilter(filters [][]string) [][]string {
+	out := cloneFilters(filters)
+	ids := append([]string{}, metaSourceIDs...)
+	ids = append(ids, googleSourceIDs...)
+	if len(ids) == 0 {
+		return out
+	}
+	value := strings.Join(ids, ",")
+	out = append(out, []string{"primary_source_id", "IN", value})
+	return out
+}
+
+func sourceIDIn(id int64, ids []string) bool {
+	if id == 0 {
+		return false
+	}
+	needle := strconv.FormatInt(id, 10)
+	for _, candidate := range ids {
+		if candidate == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func platformForSource(sourceID int64, sourceName string) string {
+	if sourceIDIn(sourceID, metaSourceIDs) {
+		return "Meta"
+	}
+	if sourceIDIn(sourceID, googleSourceIDs) {
+		return "Google"
+	}
+	name := strings.ToLower(strings.TrimSpace(sourceName))
+	if strings.Contains(name, "google") {
+		return "Google"
+	}
+	if strings.Contains(name, "facebook") || strings.Contains(name, "instagram") {
+		return "Meta"
+	}
+	return "Other"
+}
+
 func applyDateRange(filters [][]string, start, end time.Time) [][]string {
 	out := cloneFilters(filters)
 	out = append(out, []string{"doi_created", ">=", formatDateTimeStart(start)})
@@ -1562,7 +1619,7 @@ type HeardFromPerformance struct {
 }
 
 type CampaignRow struct {
-	// Platform                 string      `json:"platform"`
+	Platform                 string      `json:"platform"`
 	CampaignName             string      `json:"campaign_name"`
 	Objective                string      `json:"objective"`
 	Leads                    SummaryCell `json:"leads"`
