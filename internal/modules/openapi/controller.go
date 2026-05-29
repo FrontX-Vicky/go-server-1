@@ -58,6 +58,16 @@ func (ctl *Controller) ActiveMembersRenewalRangeCurrent(c *gin.Context) {
 	c.JSON(http.StatusOK, rows)
 }
 
+func (ctl *Controller) ActiveMembersRenewalRangePast(c *gin.Context) {
+	rows, err := ctl.Repo.ActiveMembersRenewalRangePast(c.Request.Context(), endOfTwoMonthsAgo(time.Now()))
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, rows)
+}
+
 func isTruthyQuery(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes", "y", "on":

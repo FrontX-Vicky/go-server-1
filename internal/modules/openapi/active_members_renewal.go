@@ -23,6 +23,11 @@ func defaultCurrentMonthRange(now time.Time) dateRange {
 	}
 }
 
+func endOfTwoMonthsAgo(now time.Time) string {
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	return monthStart.AddDate(0, 0, -1).AddDate(0, -1, 0).Format("2006-01-02")
+}
+
 func parseDateRange(startDate string, endDate string) (dateRange, error) {
 	start, err := time.Parse("2006-01-02", startDate)
 	if err != nil {
@@ -98,6 +103,14 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 	}
 
 	return result, nil
+}
+
+func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string) ([]orderedRow, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT * FROM "+activeMembersRenewalTable+" WHERE end_date <= ?", maxEndDate)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(rows)
 }
 
 func activeMembersRenewalInsertSQL(month dateRange) string {
