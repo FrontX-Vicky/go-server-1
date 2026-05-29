@@ -68,6 +68,46 @@ func (ctl *Controller) ActiveMembersRenewalRangePast(c *gin.Context) {
 	c.JSON(http.StatusOK, rows)
 }
 
+func (ctl *Controller) GetCurrentData(c *gin.Context) {
+	rows, err := ctl.Repo.GetCurrentData(c.Request.Context(), currentMonthToTodayRange(time.Now()))
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, rows)
+}
+
+func (ctl *Controller) GetOldData(c *gin.Context) {
+	rows, err := ctl.Repo.GetOldData(c.Request.Context(), oldMarketingRange(time.Now()))
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, rows)
+}
+
+func (ctl *Controller) RevenueReport(c *gin.Context) {
+	rows, err := ctl.Repo.RevenueReport(c.Request.Context())
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, rows)
+}
+
+func (ctl *Controller) GetDemoFormResponseData(c *gin.Context) {
+	rows, err := ctl.Repo.GetDemoFormResponseData(c.Request.Context())
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, rows)
+}
+
 func isTruthyQuery(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes", "y", "on":
