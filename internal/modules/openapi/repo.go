@@ -196,7 +196,9 @@ SELECT
 					WHERE
 						i.created_at >= '2024-01-01'
 						AND i.park = 0
-						AND c.park = 0 AND (i.bid IN(
+						AND c.park = 0
+						AND f.followup IN (0, 2)
+						AND (i.bid IN(
     SELECT
         id
     FROM
@@ -383,7 +385,9 @@ SELECT
 					WHERE
 						i.created_at >= '2024-01-01'
 						AND i.park = 0
-						AND c.park = 0 AND NOT (
+						AND c.park = 0
+						AND f.followup IN (0, 2)
+						AND NOT (
     i.bid IN(
         SELECT
             id
