@@ -2168,6 +2168,8 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 		Branch string
 	}
 	loadAttendanceRows := func(contactID int64, invoiceStartDate, actionDate string) []attRow {
+		invoiceStartDate = normalizeDateOnly(invoiceStartDate)
+		actionDate = normalizeDateOnly(actionDate)
 		rows, err := r.db1.QueryContext(ctx,
 			`SELECT COALESCE(date,''), COALESCE(bid,0), COALESCE(branch,'')
 			 FROM attendance_cont_view
@@ -2206,6 +2208,7 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 				if invData.ServiceSessions <= 0 {
 					continue
 				}
+				actionDate := normalizeDateOnly(t.ActionDate)
 				royaltyPct := onlineRoyaltyMap[t.FromBid]
 				if t.FromCatMaster == 2 {
 					if pct, ok := offlineRoyaltyMap[t.FromBatch]; ok {
@@ -2214,19 +2217,20 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 				}
 				royaltyAmount := invData.Amount * (float64(100-royaltyPct) / 100)
 				perSession := royaltyAmount / float64(invData.ServiceSessions)
-				attendanceRows := loadAttendanceRows(t.ContactID, invData.StartDate, t.ActionDate)
+				attendanceRows := loadAttendanceRows(t.ContactID, invData.StartDate, actionDate)
 
 				var prevCount int64
 				branchCount := map[string]int{}
 				branchOrder := []string{}
 				for _, a := range attendanceRows {
-					if a.Date < t.ActionDate {
+					attDate := normalizeDateOnly(a.Date)
+					if attDate < actionDate {
 						prevCount++
 						if _, ok := branchCount[a.Branch]; !ok {
 							branchOrder = append(branchOrder, a.Branch)
 						}
 						branchCount[a.Branch]++
-					} else if a.Date == t.ActionDate && a.Bid != t.ToBid {
+					} else if attDate == actionDate && a.Bid != t.ToBid {
 						prevCount++
 						if _, ok := branchCount[a.Branch]; !ok {
 							branchOrder = append(branchOrder, a.Branch)
@@ -2289,6 +2293,7 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 				if invData.ServiceSessions <= 0 {
 					continue
 				}
+				actionDate := normalizeDateOnly(t.ActionDate)
 				royaltyPct := onlineRoyaltyMap[t.ToBid]
 				if t.ToCatMaster == 2 {
 					if pct, ok := offlineRoyaltyMap[t.ToBatch]; ok {
@@ -2297,17 +2302,18 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 				}
 				royaltyAmount := invData.Amount * (float64(100-royaltyPct) / 100)
 				perSession := royaltyAmount / float64(invData.ServiceSessions)
-				attendanceRows := loadAttendanceRows(t.ContactID, invData.StartDate, t.ActionDate)
+				attendanceRows := loadAttendanceRows(t.ContactID, invData.StartDate, actionDate)
 
 				var prevCount int64
 				branchCount := map[string]int{}
 				branchOrder := []string{}
 				for _, a := range attendanceRows {
+					attDate := normalizeDateOnly(a.Date)
 					if _, ok := branchCount[a.Branch]; !ok {
 						branchOrder = append(branchOrder, a.Branch)
 					}
 					branchCount[a.Branch]++
-					if a.Bid != t.ToBid {
+					if attDate <= actionDate && a.Bid != t.ToBid {
 						prevCount++
 					}
 				}
@@ -2387,6 +2393,14 @@ func formatMonthYear(dateStr string) string {
 		return ""
 	}
 	return t.Format("Jan 06")
+}
+
+func normalizeDateOnly(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 10 {
+		return v[:10]
+	}
+	return v
 }
 
 // parseStoredParticulars parses the other_items JSON blob from franchise_invoice.
