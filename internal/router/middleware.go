@@ -2,12 +2,11 @@ package router
 
 import (
     "context"
+    "strings"
     "time"
     "github.com/gin-gonic/gin"
     "github.com/rs/zerolog/log"
 )
-
-const timeoutOverrideKey = "request-timeout-override"
 
 func RequestLogger() gin.HandlerFunc {
     return func(c *gin.Context) {
@@ -27,25 +26,16 @@ func RequestLogger() gin.HandlerFunc {
 func WithTimeout(d time.Duration) gin.HandlerFunc {
     return func(c *gin.Context) {
         timeout := d
-        if v, ok := c.Get(timeoutOverrideKey); ok {
-            if override, ok := v.(time.Duration); ok && override > 0 {
-                timeout = override
-            }
+
+        // Finance invoice-list runs a heavy aggregation over invoice_payment_franchisee_view.
+        // Give this endpoint longer than the default request timeout.
+        if strings.HasSuffix(c.Request.URL.Path, "/finance/franchise-invoice/invoice-list") {
+            timeout = 90 * time.Second
         }
 
         ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
         defer cancel()
         c.Request = c.Request.WithContext(ctx)
-        c.Next()
-    }
-}
-
-// WithRequestTimeoutOverride sets a per-request timeout that WithTimeout will honor.
-func WithRequestTimeoutOverride(d time.Duration) gin.HandlerFunc {
-    return func(c *gin.Context) {
-        if d > 0 {
-            c.Set(timeoutOverrideKey, d)
-        }
         c.Next()
     }
 }
