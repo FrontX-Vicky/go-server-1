@@ -85,7 +85,7 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 	if report {
 		rows, err = tx.QueryContext(ctx, "SELECT start_date, SUM(active) AS active, SUM(active_ex) AS active_ex, SUM(`new`) AS `new`, SUM(renew) AS renew, SUM(late_renew) AS late_renew, SUM(due) AS due, SUM(grace) AS grace, SUM(dropout) AS dropout, status FROM "+activeMembersRenewalTable+" WHERE start_date = ? GROUP BY status", current.start)
 	} else {
-		rows, err = tx.QueryContext(ctx, "SELECT *, (SELECT MIN(p.date) FROM pf_TickleRight_9210.invoice i JOIN pf_TickleRight_9210.payment p ON p.invoice_id = i.id WHERE i.contact_id = "+activeMembersRenewalTable+".contact_id AND i.park = 0 AND p.park = 0) AS first_payment_date FROM "+activeMembersRenewalTable+" WHERE start_date BETWEEN ? AND ?", previous.start, current.start)
+		rows, err = tx.QueryContext(ctx, "SELECT * FROM "+activeMembersRenewalTable+" WHERE start_date BETWEEN ? AND ?", previous.start, current.start)
 	}
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 }
 
 func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string) ([]orderedRow, error) {
-	rows, err := r.db.QueryContext(ctx, "SELECT *, (SELECT MIN(p.date) FROM pf_TickleRight_9210.invoice i JOIN pf_TickleRight_9210.payment p ON p.invoice_id = i.id WHERE i.contact_id = "+activeMembersRenewalTable+".contact_id AND i.park = 0 AND p.park = 0) AS first_payment_date FROM "+activeMembersRenewalTable+" WHERE end_date <= ?", maxEndDate)
+	rows, err := r.db.QueryContext(ctx, "SELECT * FROM "+activeMembersRenewalTable+" WHERE end_date <= ?", maxEndDate)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +250,7 @@ func coerceBoolValue(value any) any {
 
 func activeMembersRenewalInsertSQL(month dateRange) string {
 	return fmt.Sprintf(`
-INSERT INTO %s(contact_id, fullname, t_fullname, master_trainer_fullname, dropout_reason, start_date, end_date, type, branch, venue, venue_id, online, offline, dob, years, months, pay_date, member_creation_date, invoice_start_date, invoice_end_date, duration, due_date, grace_end_date, next_payment_date, active, active_ex, ` + "`new`" + `, renew, late_renew, due, grace, dropout, status)
+INSERT INTO %s(contact_id, fullname, t_fullname, master_trainer_fullname, dropout_reason, start_date, end_date, type, branch, venue, venue_id, online, offline, dob, years, months, pay_date, member_creation_date, invoice_start_date, invoice_end_date, duration, due_date, grace_end_date, next_payment_date, active, active_ex, ` + "`new`" + `, renew, late_renew, due, grace, dropout, status, first_payment_date)
 WITH future_members AS (
 	SELECT
 		i.contact_id,
@@ -289,7 +289,15 @@ WITH future_members AS (
 		0 AS due,
 		0 AS grace,
 		0 AS dropout,
-		'Member' AS status
+		'Member' AS status,
+		(
+			SELECT MIN(fp.date)
+			FROM pf_TickleRight_9210.invoice fi
+			JOIN pf_TickleRight_9210.payment fp ON fp.invoice_id = fi.id
+			WHERE fi.contact_id = i.contact_id
+				AND fi.park = 0
+				AND fp.park = 0
+		) AS first_payment_date
 	FROM
 		pf_TickleRight_9210.invoice i
 		JOIN pf_TickleRight_9210.invoice_item ii ON i.id = ii.invoice_id
@@ -572,7 +580,15 @@ active_members AS (
 				END
 			)
 			WHEN ii.end_date < '%s' THEN 'Dropout'
-		END AS status
+		END AS status,
+		(
+			SELECT MIN(fp.date)
+			FROM pf_TickleRight_9210.invoice fi
+			JOIN pf_TickleRight_9210.payment fp ON fp.invoice_id = fi.id
+			WHERE fi.contact_id = i.contact_id
+				AND fi.park = 0
+				AND fp.park = 0
+		) AS first_payment_date
 	FROM
 		pf_TickleRight_9210.invoice i
 		JOIN pf_TickleRight_9210.invoice_item ii ON i.id = ii.invoice_id
