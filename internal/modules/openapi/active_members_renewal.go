@@ -143,6 +143,7 @@ var activeMembersRenewalBoolColumns = map[string]struct{}{
 	"due":        {},
 	"grace":      {},
 	"dropout":    {},
+	"managed_by_coco": {},
 }
 
 func coerceActiveMembersRenewalDetailRows(rows []orderedRow) []orderedRow {
@@ -250,7 +251,7 @@ func coerceBoolValue(value any) any {
 
 func activeMembersRenewalInsertSQL(month dateRange) string {
 	return fmt.Sprintf(`
-INSERT INTO %s(contact_id, fullname, t_fullname, master_trainer_fullname, dropout_reason, start_date, end_date, type, branch, venue, venue_id, online, offline, dob, years, months, pay_date, member_creation_date, invoice_start_date, invoice_end_date, duration, due_date, grace_end_date, next_payment_date, active, active_ex, ` + "`new`" + `, renew, late_renew, due, grace, dropout, status, first_payment_date)
+INSERT INTO %s(contact_id, fullname, t_fullname, master_trainer_fullname, dropout_reason, start_date, end_date, type, branch, venue, venue_id, online, offline, dob, years, months, pay_date, member_creation_date, invoice_start_date, invoice_end_date, duration, due_date, grace_end_date, next_payment_date, active, active_ex, ` + "`new`" + `, renew, late_renew, due, grace, dropout, status, first_payment_date, managed_by_coco)
 WITH future_members AS (
 	SELECT
 		i.contact_id,
@@ -297,7 +298,18 @@ WITH future_members AS (
 			WHERE fi.contact_id = i.contact_id
 				AND fi.park = 0
 				AND fp.park = 0
-		) AS first_payment_date
+		) AS first_payment_date,
+		CASE
+			WHEN (
+				i.bid IN (
+					SELECT id
+					FROM pf_TickleRight_9210.branch
+					WHERE counsellors_incentives = 1
+						AND park = 0
+				) OR b.type = 'COCO'
+			) THEN 1
+			ELSE 0
+		END AS managed_by_coco
 	FROM
 		pf_TickleRight_9210.invoice i
 		JOIN pf_TickleRight_9210.invoice_item ii ON i.id = ii.invoice_id
@@ -588,7 +600,18 @@ active_members AS (
 			WHERE fi.contact_id = i.contact_id
 				AND fi.park = 0
 				AND fp.park = 0
-		) AS first_payment_date
+		) AS first_payment_date,
+		CASE
+			WHEN (
+				i.bid IN (
+					SELECT id
+					FROM pf_TickleRight_9210.branch
+					WHERE counsellors_incentives = 1
+						AND park = 0
+				) OR b.type = 'COCO'
+			) THEN 1
+			ELSE 0
+		END AS managed_by_coco
 	FROM
 		pf_TickleRight_9210.invoice i
 		JOIN pf_TickleRight_9210.invoice_item ii ON i.id = ii.invoice_id
