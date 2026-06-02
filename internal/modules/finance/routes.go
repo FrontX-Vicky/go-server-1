@@ -1,9 +1,12 @@
 package finance
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 
 	"server_1/internal/core/prism"
+	"server_1/internal/router"
 )
 
 func MountRoutes(v1 *gin.RouterGroup, checker prism.Checker) {
@@ -24,5 +27,5 @@ func MountRoutes(v1 *gin.RouterGroup, checker prism.Checker) {
 	invG.POST("/sales-invoice", inv.CreateSalesInvoice)
 	invG.POST("/sales-invoice-document", inv.RegenerateSalesInvoiceDocument)
 	invG.GET("/annexure", inv.GetMemberTransferAnnexure)
-	invG.GET("/invoice-list", inv.GetInvoiceList)
+	invG.GET("/invoice-list", router.WithRequestTimeoutOverride(90*time.Second), inv.GetInvoiceList)
 }
