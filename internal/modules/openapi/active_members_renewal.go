@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -102,6 +103,10 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 		return nil, err
 	}
 
+	if !report {
+		result = coerceActiveMembersRenewalDetailRows(result)
+	}
+
 	return result, nil
 }
 
@@ -110,7 +115,137 @@ func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate str
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(rows)
+	result, err := scanRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	return coerceActiveMembersRenewalDetailRows(result), nil
+}
+
+var activeMembersRenewalIntColumns = map[string]struct{}{
+	"contact_id": {},
+	"venue_id":   {},
+	"months":     {},
+}
+
+var activeMembersRenewalFloatColumns = map[string]struct{}{
+	"years": {},
+}
+
+var activeMembersRenewalBoolColumns = map[string]struct{}{
+	"online":     {},
+	"offline":    {},
+	"active":     {},
+	"active_ex":  {},
+	"new":        {},
+	"renew":      {},
+	"late_renew": {},
+	"due":        {},
+	"grace":      {},
+	"dropout":    {},
+}
+
+func coerceActiveMembersRenewalDetailRows(rows []orderedRow) []orderedRow {
+	for rowIndex := range rows {
+		for column, value := range rows[rowIndex].values {
+			if _, ok := activeMembersRenewalIntColumns[column]; ok {
+				rows[rowIndex].values[column] = coerceIntValue(value)
+				continue
+			}
+			if _, ok := activeMembersRenewalFloatColumns[column]; ok {
+				rows[rowIndex].values[column] = coerceFloatValue(value)
+				continue
+			}
+			if _, ok := activeMembersRenewalBoolColumns[column]; ok {
+				rows[rowIndex].values[column] = coerceBoolValue(value)
+			}
+		}
+	}
+	return rows
+}
+
+func coerceIntValue(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		if typed == "" {
+			return typed
+		}
+		parsed, err := strconv.Atoi(typed)
+		if err != nil {
+			return value
+		}
+		return parsed
+	default:
+		return value
+	}
+}
+
+func coerceFloatValue(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case float32:
+		return float64(typed)
+	case float64:
+		return typed
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case string:
+		if typed == "" {
+			return typed
+		}
+		parsed, err := strconv.ParseFloat(typed, 64)
+		if err != nil {
+			return value
+		}
+		return parsed
+	default:
+		return value
+	}
+}
+
+func coerceBoolValue(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case bool:
+		return typed
+	case int:
+		return typed != 0
+	case int32:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case float64:
+		return typed != 0
+	case string:
+		if typed == "" {
+			return typed
+		}
+		if typed == "1" {
+			return true
+		}
+		if typed == "0" {
+			return false
+		}
+		return value
+	default:
+		return value
+	}
 }
 
 func activeMembersRenewalInsertSQL(month dateRange) string {
