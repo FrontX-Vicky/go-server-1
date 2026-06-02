@@ -1,7 +1,6 @@
 package finance
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -262,10 +261,7 @@ func (ctl *FranchiseInvoiceController) GetInvoiceList(c *gin.Context) {
 		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "valid invoice_id is required"})
 		return
 	}
-	// invoice_payment_franchisee_view is a heavy join — give it more time than the global 20s limit.
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
-	defer cancel()
-	result, err := ctl.Repo.GetInvoiceList(ctx, invoiceID)
+	result, err := ctl.Repo.GetInvoiceList(c.Request.Context(), invoiceID)
 	if err != nil {
 		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
