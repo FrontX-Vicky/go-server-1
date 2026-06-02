@@ -2238,10 +2238,12 @@ func (r *FranchiseInvoiceRepo) GetMemberTransferAnnexure(ctx context.Context, ow
 						branchCount[a.Branch]++
 					}
 				}
-				// Legacy PHP allows negative pending sessions here, which produces
-				// negative receivable amounts in cases where transfer-day attendance
-				// already exhausted or exceeded the nominal service session count.
+				// TTOC is receivable; do not allow negative pending sessions to
+				// turn receivable into a negative amount.
 				pendingSession := invData.ServiceSessions - prevCount
+				if pendingSession < 0 {
+					pendingSession = 0
+				}
 				forwardAmt := roundFloat(perSession*float64(pendingSession), 0)
 
 				sessionsDone := []string{}
