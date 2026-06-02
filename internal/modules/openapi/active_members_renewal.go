@@ -85,7 +85,7 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 	if report {
 		rows, err = tx.QueryContext(ctx, "SELECT start_date, SUM(active) AS active, SUM(active_ex) AS active_ex, SUM(`new`) AS `new`, SUM(renew) AS renew, SUM(late_renew) AS late_renew, SUM(due) AS due, SUM(grace) AS grace, SUM(dropout) AS dropout, status FROM "+activeMembersRenewalTable+" WHERE start_date = ? GROUP BY status", current.start)
 	} else {
-		rows, err = tx.QueryContext(ctx, "SELECT * FROM "+activeMembersRenewalTable+" WHERE start_date BETWEEN ? AND ?", previous.start, current.start)
+		rows, err = tx.QueryContext(ctx, "SELECT *, (SELECT MIN(p.date) FROM pf_TickleRight_9210.invoice i JOIN pf_TickleRight_9210.payment p ON p.invoice_id = i.id WHERE i.contact_id = "+activeMembersRenewalTable+".contact_id AND i.park = 0 AND p.park = 0) AS first_payment_date FROM "+activeMembersRenewalTable+" WHERE start_date BETWEEN ? AND ?", previous.start, current.start)
 	}
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 }
 
 func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string) ([]orderedRow, error) {
-	rows, err := r.db.QueryContext(ctx, "SELECT * FROM "+activeMembersRenewalTable+" WHERE end_date <= ?", maxEndDate)
+	rows, err := r.db.QueryContext(ctx, "SELECT *, (SELECT MIN(p.date) FROM pf_TickleRight_9210.invoice i JOIN pf_TickleRight_9210.payment p ON p.invoice_id = i.id WHERE i.contact_id = "+activeMembersRenewalTable+".contact_id AND i.park = 0 AND p.park = 0) AS first_payment_date FROM "+activeMembersRenewalTable+" WHERE end_date <= ?", maxEndDate)
 	if err != nil {
 		return nil, err
 	}
