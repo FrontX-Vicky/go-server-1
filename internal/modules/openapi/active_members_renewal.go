@@ -81,20 +81,6 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-UPDATE `+activeMembersRenewalTable+` amr
-SET amr.first_payment_date = (
-	SELECT MIN(p.date)
-	FROM pf_TickleRight_9210.invoice i
-	JOIN pf_TickleRight_9210.payment p ON p.invoice_id = i.id
-	WHERE i.contact_id = amr.contact_id
-		AND i.park = 0
-		AND p.park = 0
-)
-WHERE amr.start_date <= ?`, current.start); err != nil {
-		return nil, err
-	}
-
 	var rows *sql.Rows
 	if report {
 		rows, err = tx.QueryContext(ctx, "SELECT start_date, SUM(active) AS active, SUM(active_ex) AS active_ex, SUM(`new`) AS `new`, SUM(renew) AS renew, SUM(late_renew) AS late_renew, SUM(due) AS due, SUM(grace) AS grace, SUM(dropout) AS dropout, status FROM "+activeMembersRenewalTable+" WHERE start_date = ? GROUP BY status", current.start)
