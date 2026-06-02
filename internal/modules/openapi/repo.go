@@ -150,7 +150,10 @@ SELECT
 							LEFT JOIN (
 								SELECT
 									p1.invoice_id,
-									p1.amount AS first_payment_amount,
+									CASE
+										WHEN p1.pay_mode = 1 THEN p1.amount
+										ELSE p1.calculated_amount
+									END AS first_payment_amount,
 									p1.date AS first_payment_date,
 									p1.pay_mode AS pay_mode
 								FROM
@@ -339,7 +342,10 @@ SELECT
 							LEFT JOIN (
 								SELECT
 									p1.invoice_id,
-									p1.amount AS first_payment_amount,
+									CASE
+										WHEN p1.pay_mode = 1 THEN p1.amount
+										ELSE p1.calculated_amount
+									END AS first_payment_amount,
 									p1.date AS first_payment_date,
 									p1.pay_mode AS pay_mode
 								FROM
