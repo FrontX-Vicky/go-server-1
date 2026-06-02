@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -319,6 +320,14 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	// For transfer items (TTOC/TFOC), align GST percentages with the parent Royalty item.
 	// This mirrors legacy behavior where transfer sub-invoices use royalty GST rates.
 	if transferSectionKey != "" && selectedItem != nil {
+		// Transfer lines must never persist as negative values in sub-invoices.
+		selectedItem.Amount = roundFloat(math.Abs(selectedItem.Amount), 2)
+		if selectedLabel != "" {
+			if b, err := json.Marshal(map[string]*ParticularItem{selectedLabel: selectedItem}); err == nil {
+				otherItems = string(b)
+			}
+		}
+
 		parentParticulars := parseStoredParticulars(parentItems)
 		if royaltyItem := parentParticulars["Royalty"]; royaltyItem != nil {
 			selectedItem.CGST = royaltyItem.CGST
@@ -335,11 +344,6 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 				req.GrantTotal = grantFromRates
 			}
 
-			if selectedLabel != "" {
-				if b, err := json.Marshal(map[string]*ParticularItem{selectedLabel: selectedItem}); err == nil {
-					otherItems = string(b)
-				}
-			}
 		}
 	}
 
@@ -352,6 +356,9 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 		} else {
 			grantTotal = parentGrant
 		}
+	}
+	if transferSectionKey != "" {
+		grantTotal = roundFloat(math.Abs(grantTotal), 2)
 	}
 	proforma := req.Proforma
 	if strings.TrimSpace(proforma) == "" {
@@ -793,6 +800,9 @@ func parseFranchiseLineItems(otherItems string, grantTotal float64, preferredLab
 				description = strings.TrimSpace(preferredLabel)
 			}
 			amount := toFloat(item["amount"])
+			if transferSectionKeyFromParticular(label) != "" || transferSectionKeyFromParticular(description) != "" {
+				amount = roundFloat(math.Abs(amount), 2)
+			}
 			if amount == 0 {
 				continue
 			}
@@ -831,6 +841,9 @@ func parseFranchiseLineItems(otherItems string, grantTotal float64, preferredLab
 	if len(items) == 0 {
 		// Fallback single exempt line item.
 		amt := roundFloat(grantTotal, 2)
+		if transferSectionKeyFromParticular(preferredLabel) != "" {
+			amt = roundFloat(math.Abs(amt), 2)
+		}
 		items = []salesLineItem{{
 			Description:  firstNonEmpty(strings.TrimSpace(preferredLabel), "Franchisee invoice item"),
 			HSN:          "9997",
