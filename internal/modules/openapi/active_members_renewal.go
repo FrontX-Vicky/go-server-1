@@ -119,6 +119,20 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 }
 
 func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string, page int, pageSize int) (paginatedRows, error) {
+	cacheKey := openapiCacheKey("active_members_renewal_range_past", maxEndDate, "page=", page, "page_size=", pageSize)
+	hitKey := cacheKey + ":hits"
+
+	hitCount, err := refreshHitCount(ctx, hitKey, openapiCacheTTL, openapiCacheRefreshHits)
+	if err == nil && hitCount > 0 && hitCount < openapiCacheRefreshHits {
+		var cached paginatedRows
+		if getCachedOpenAPIJSON(ctx, cacheKey, &cached) {
+			return cached, nil
+		}
+	}
+	if err == nil && hitCount >= openapiCacheRefreshHits {
+		defer resetHitCount(ctx, hitKey)
+	}
+
 	var total int
 	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+activeMembersRenewalTable+" WHERE end_date <= ?", maxEndDate).Scan(&total); err != nil {
 		return paginatedRows{}, err
@@ -147,13 +161,17 @@ func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate str
 		totalPages = (total + pageSize - 1) / pageSize
 	}
 
-	return paginatedRows{
+	response := paginatedRows{
 		Rows:       coerceActiveMembersRenewalDetailRows(result),
 		Total:      total,
 		Page:       page,
 		PageSize:   pageSize,
 		TotalPages: totalPages,
-	}, nil
+	}
+
+	setCachedOpenAPIJSON(ctx, cacheKey, response, openapiCacheTTL)
+
+	return response, nil
 }
 
 var activeMembersRenewalIntColumns = map[string]struct{}{
