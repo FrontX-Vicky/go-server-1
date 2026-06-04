@@ -353,7 +353,17 @@ WITH future_members AS (
 		LEFT JOIN pf_TickleRight_9210.batch ba ON ba.id = ii.batch_id
 		LEFT JOIN pf_TickleRight_9210.venue v ON v.id = ba.venue_id
 		LEFT JOIN pf_TickleRight_9210.category ct ON ct.id = ii.category_id
-		LEFT JOIN pf_TickleRight_9210.payment p ON p.invoice_id = i.id
+		LEFT JOIN (
+			SELECT p1.invoice_id, p1.id, p1.date
+			FROM pf_TickleRight_9210.payment p1
+			JOIN (
+				SELECT invoice_id, MIN(id) AS min_id
+				FROM pf_TickleRight_9210.payment
+				WHERE park = 0
+				GROUP BY invoice_id
+			) p2 ON p2.invoice_id = p1.invoice_id AND p2.min_id = p1.id
+			WHERE p1.park = 0
+		) p ON p.invoice_id = i.id
 		LEFT JOIN pf_TickleRight_9210.contact c3 ON m.t_contact_id = c3.id
 		LEFT JOIN pf_TickleRight_9210.employee e_t ON e_t.contact_id = m.t_contact_id
 		LEFT JOIN pf_TickleRight_9210.contact mtc ON mtc.id = e_t.master_trainer_contact_id
@@ -655,7 +665,17 @@ active_members AS (
 		LEFT JOIN pf_TickleRight_9210.batch ba ON ba.id = ii.batch_id
 		LEFT JOIN pf_TickleRight_9210.venue v ON v.id = ba.venue_id
 		LEFT JOIN pf_TickleRight_9210.category ct ON ct.id = ii.category_id
-		LEFT JOIN pf_TickleRight_9210.payment p ON p.invoice_id = i.id
+		LEFT JOIN (
+			SELECT p1.invoice_id, p1.id, p1.date
+			FROM pf_TickleRight_9210.payment p1
+			JOIN (
+				SELECT invoice_id, MIN(id) AS min_id
+				FROM pf_TickleRight_9210.payment
+				WHERE park = 0
+				GROUP BY invoice_id
+			) p2 ON p2.invoice_id = p1.invoice_id AND p2.min_id = p1.id
+			WHERE p1.park = 0
+		) p ON p.invoice_id = i.id
 		LEFT JOIN pf_TickleRight_9210.contact c3 ON m.t_contact_id = c3.id
 		LEFT JOIN pf_TickleRight_9210.employee e_t ON e_t.contact_id = m.t_contact_id
 		LEFT JOIN pf_TickleRight_9210.contact mtc ON mtc.id = e_t.master_trainer_contact_id
@@ -685,8 +705,8 @@ active_members AS (
 		AND b.park = 0
 	GROUP BY i.contact_id
 )
-SELECT * FROM future_members
-UNION ALL
+	SELECT * FROM future_members
+UNION
 SELECT * FROM active_members`,
 		activeMembersRenewalTable,
 		month.start, month.end,
