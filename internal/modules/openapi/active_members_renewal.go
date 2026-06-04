@@ -110,8 +110,12 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 	return result, nil
 }
 
-func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string) ([]orderedRow, error) {
-	cacheKey := openapiCacheKey("active_members_renewal_range_past", maxEndDate)
+func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string, filter *dateRange) ([]orderedRow, error) {
+	cacheKeyParts := []any{"active_members_renewal_range_past", maxEndDate}
+	if filter != nil {
+		cacheKeyParts = append(cacheKeyParts, "start=", filter.start, "end=", filter.end)
+	}
+	cacheKey := openapiCacheKey(cacheKeyParts...)
 	hitKey := cacheKey + ":hits"
 
 	hitCount, err := refreshHitCount(ctx, hitKey, openapiCacheTTL, openapiCacheRefreshHits)
@@ -125,11 +129,18 @@ func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate str
 		defer resetHitCount(ctx, hitKey)
 	}
 
-	rows, err := r.db.QueryContext(
-		ctx,
-		"SELECT * FROM "+activeMembersRenewalTable+" WHERE end_date <= ? ORDER BY end_date DESC, start_date DESC, contact_id DESC",
-		maxEndDate,
-	)
+	query := "SELECT * FROM " + activeMembersRenewalTable
+	args := []any{}
+	if filter != nil {
+		query += " WHERE end_date BETWEEN ? AND ?"
+		args = append(args, filter.start, filter.end)
+	} else {
+		query += " WHERE end_date <= ?"
+		args = append(args, maxEndDate)
+	}
+	query += " ORDER BY end_date DESC, start_date DESC, contact_id DESC"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
