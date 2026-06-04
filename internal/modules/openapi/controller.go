@@ -2,8 +2,6 @@ package openapi
 
 import (
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -60,26 +58,7 @@ func (ctl *Controller) ActiveMembersRenewalRangeCurrent(c *gin.Context) {
 }
 
 func (ctl *Controller) ActiveMembersRenewalRangePast(c *gin.Context) {
-	pageSize, err := parsePositiveQueryInt(c.Query("page_size"), 1000, 5000)
-	if err != nil {
-		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "page_size must be a positive integer up to 5000"})
-		return
-	}
-	if pageSize == 1000 && c.Query("limit") != "" {
-		pageSize, err = parsePositiveQueryInt(c.Query("limit"), 1000, 5000)
-		if err != nil {
-			httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "limit must be a positive integer up to 5000"})
-			return
-		}
-	}
-
-	page, err := parsePositiveQueryInt(c.Query("page"), 1, 0)
-	if err != nil {
-		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "page must be a positive integer"})
-		return
-	}
-
-	rows, err := ctl.Repo.ActiveMembersRenewalRangePast(c.Request.Context(), endOfTwoMonthsAgo(time.Now()), page, pageSize)
+	rows, err := ctl.Repo.ActiveMembersRenewalRangePast(c.Request.Context(), endOfTwoMonthsAgo(time.Now()))
 	if err != nil {
 		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -135,23 +114,4 @@ func isTruthyQuery(value string) bool {
 	default:
 		return false
 	}
-}
-
-func parsePositiveQueryInt(value string, fallback int, max int) (int, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return 0, err
-	}
-	if parsed <= 0 {
-		return 0, strconv.ErrSyntax
-	}
-	if max > 0 && parsed > max {
-		return 0, strconv.ErrRange
-	}
-	return parsed, nil
 }
