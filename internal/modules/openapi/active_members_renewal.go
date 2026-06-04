@@ -120,9 +120,9 @@ func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate str
 
 	hitCount, err := refreshHitCount(ctx, hitKey, openapiCacheTTL, openapiCacheRefreshHits)
 	if err == nil && hitCount > 0 && hitCount < openapiCacheRefreshHits {
-		var cached []orderedRow
+		var cached []cachedOrderedRow
 		if getCachedOpenAPIJSON(ctx, cacheKey, &cached) {
-			return cached, nil
+			return coerceActiveMembersRenewalDetailRows(cachedToOrderedRows(cached)), nil
 		}
 	}
 	if err == nil && hitCount >= openapiCacheRefreshHits {
@@ -152,7 +152,7 @@ func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate str
 	}
 
 	response := coerceActiveMembersRenewalDetailRows(result)
-	setCachedOpenAPIJSON(ctx, cacheKey, response, openapiCacheTTL)
+	setCachedOpenAPIJSON(ctx, cacheKey, orderedRowsToCached(response), openapiCacheTTL)
 	return response, nil
 }
 

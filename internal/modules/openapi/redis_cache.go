@@ -125,3 +125,29 @@ func resetHitCount(ctx context.Context, key string) {
 	_ = client.Del(ctx, key).Err()
 }
 
+type cachedOrderedRow struct {
+	Columns []string       `json:"columns"`
+	Values  map[string]any `json:"values"`
+}
+
+func orderedRowsToCached(rows []orderedRow) []cachedOrderedRow {
+	cached := make([]cachedOrderedRow, 0, len(rows))
+	for _, row := range rows {
+		cached = append(cached, cachedOrderedRow{
+			Columns: append([]string(nil), row.columns...),
+			Values:  row.values,
+		})
+	}
+	return cached
+}
+
+func cachedToOrderedRows(rows []cachedOrderedRow) []orderedRow {
+	result := make([]orderedRow, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, orderedRow{
+			columns: append([]string(nil), row.Columns...),
+			values:  row.Values,
+		})
+	}
+	return result
+}
