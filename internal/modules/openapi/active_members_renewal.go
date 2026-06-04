@@ -15,14 +15,6 @@ type dateRange struct {
 	end   string
 }
 
-type paginatedRows struct {
-	Rows       []orderedRow `json:"rows"`
-	Total      int          `json:"total"`
-	Page       int          `json:"page"`
-	PageSize   int          `json:"page_size"`
-	TotalPages int          `json:"total_pages"`
-}
-
 func defaultCurrentMonthRange(now time.Time) dateRange {
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 	end := start.AddDate(0, 1, -1)
@@ -118,13 +110,13 @@ func (r *Repo) ActiveMembersRenewalRangeCurrent(ctx context.Context, current dat
 	return result, nil
 }
 
-func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string, page int, pageSize int) (paginatedRows, error) {
-	cacheKey := openapiCacheKey("active_members_renewal_range_past", maxEndDate, "page=", page, "page_size=", pageSize)
+func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate string) ([]orderedRow, error) {
+	cacheKey := openapiCacheKey("active_members_renewal_range_past", maxEndDate)
 	hitKey := cacheKey + ":hits"
 
 	hitCount, err := refreshHitCount(ctx, hitKey, openapiCacheTTL, openapiCacheRefreshHits)
 	if err == nil && hitCount > 0 && hitCount < openapiCacheRefreshHits {
-		var cached paginatedRows
+		var cached []orderedRow
 		if getCachedOpenAPIJSON(ctx, cacheKey, &cached) {
 			return cached, nil
 		}
@@ -133,44 +125,23 @@ func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate str
 		defer resetHitCount(ctx, hitKey)
 	}
 
-	var total int
-	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+activeMembersRenewalTable+" WHERE end_date <= ?", maxEndDate).Scan(&total); err != nil {
-		return paginatedRows{}, err
-	}
-
-	offset := (page - 1) * pageSize
 	rows, err := r.db.QueryContext(
 		ctx,
-		"SELECT * FROM "+activeMembersRenewalTable+" WHERE end_date <= ? ORDER BY end_date DESC, start_date DESC, contact_id DESC LIMIT ? OFFSET ?",
+		"SELECT * FROM "+activeMembersRenewalTable+" WHERE end_date <= ? ORDER BY end_date DESC, start_date DESC, contact_id DESC",
 		maxEndDate,
-		pageSize,
-		offset,
 	)
 	if err != nil {
-		return paginatedRows{}, err
+		return nil, err
 	}
 	defer rows.Close()
 
 	result, err := scanRows(rows)
 	if err != nil {
-		return paginatedRows{}, err
+		return nil, err
 	}
 
-	totalPages := 0
-	if total > 0 {
-		totalPages = (total + pageSize - 1) / pageSize
-	}
-
-	response := paginatedRows{
-		Rows:       coerceActiveMembersRenewalDetailRows(result),
-		Total:      total,
-		Page:       page,
-		PageSize:   pageSize,
-		TotalPages: totalPages,
-	}
-
+	response := coerceActiveMembersRenewalDetailRows(result)
 	setCachedOpenAPIJSON(ctx, cacheKey, response, openapiCacheTTL)
-
 	return response, nil
 }
 
