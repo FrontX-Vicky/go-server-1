@@ -132,10 +132,10 @@ func (r *Repo) ActiveMembersRenewalRangePast(ctx context.Context, maxEndDate str
 	query := "SELECT * FROM " + activeMembersRenewalTable
 	args := []any{}
 	if filter != nil {
-		query += " WHERE end_date BETWEEN ? AND ?"
+		query += " WHERE start_date BETWEEN ? AND ?"
 		args = append(args, filter.start, filter.end)
 	} else {
-		query += " WHERE end_date <= ?"
+		query += " WHERE start_date <= ?"
 		args = append(args, maxEndDate)
 	}
 	query += " ORDER BY end_date DESC, start_date DESC, contact_id DESC"
