@@ -1371,7 +1371,7 @@ func removeDateFilters(filters [][]string) [][]string {
 func withMetaSourceFilter(filters [][]string) [][]string {
 	out := cloneFilters(filters)
 	value := strings.Join(metaSourceIDs, ",")
-	out = append(out, []string{"primary_source_id", "IN", value})
+	out = append(out, []string{"primary_source_id|source_id", "IN", value})
 	return out
 }
 
