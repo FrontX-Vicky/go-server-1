@@ -1246,24 +1246,17 @@ func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 			continue
 		}
 
+		fields, err := splitFilterFields(field)
+		if err != nil {
+			return "", nil, fmt.Errorf("filter %d: %w", idx, err)
+		}
+		if len(fields) == 0 {
+			continue
+		}
+
 		if op == "IN" {
 			parts := strings.Split(value, ",")
 			placeholders := make([]string, 0, len(parts))
-			fields := strings.Split(field, "|")
-			fieldClauses := make([]string, 0, len(fields))
-			for _, rawField := range fields {
-				trimmedField := strings.TrimSpace(rawField)
-				if trimmedField == "" {
-					continue
-				}
-				if !columnPattern.MatchString(trimmedField) {
-					return "", nil, fmt.Errorf("filter %d: invalid field %q", idx, trimmedField)
-				}
-				fieldClauses = append(fieldClauses, trimmedField)
-			}
-			if len(fieldClauses) == 0 {
-				continue
-			}
 			for _, part := range parts {
 				val := strings.Trim(strings.TrimSpace(part), "'\"")
 				if val == "" {
@@ -1275,27 +1268,38 @@ func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 			if len(placeholders) == 0 {
 				continue
 			}
-			if len(fieldClauses) == 1 {
-				query += fmt.Sprintf(" AND %s IN (%s)", fieldClauses[0], strings.Join(placeholders, ","))
+			if len(fields) == 1 {
+				query += fmt.Sprintf(" AND %s IN (%s)", fields[0], strings.Join(placeholders, ","))
 				continue
 			}
-			orClauses := make([]string, 0, len(fieldClauses))
-			dupArgs := make([]any, 0, len(args)*len(fieldClauses))
-			for _, clauseField := range fieldClauses {
+			orClauses := make([]string, 0, len(fields))
+			filterArgs := append([]any(nil), args[len(args)-len(placeholders):]...)
+			dupArgs := make([]any, 0, len(filterArgs)*len(fields))
+			for _, clauseField := range fields {
 				orClauses = append(orClauses, fmt.Sprintf("%s IN (%s)", clauseField, strings.Join(placeholders, ",")))
-				dupArgs = append(dupArgs, args[len(args)-len(placeholders):]...)
+				dupArgs = append(dupArgs, filterArgs...)
 			}
 			args = append(args[:len(args)-len(placeholders)], dupArgs...)
 			query += " AND (" + strings.Join(orClauses, " OR ") + ")"
 			continue
 		}
 
-		if !columnPattern.MatchString(field) {
-			return "", nil, fmt.Errorf("filter %d: invalid field %q", idx, field)
+		if len(fields) == 1 {
+			query += fmt.Sprintf(" AND %s %s ?", fields[0], op)
+			args = append(args, value)
+			continue
 		}
 
-		query += fmt.Sprintf(" AND %s %s ?", field, op)
-		args = append(args, value)
+		joiner := " OR "
+		if op == "!=" {
+			joiner = " AND "
+		}
+		fieldClauses := make([]string, 0, len(fields))
+		for _, clauseField := range fields {
+			fieldClauses = append(fieldClauses, fmt.Sprintf("%s %s ?", clauseField, op))
+			args = append(args, value)
+		}
+		query += " AND (" + strings.Join(fieldClauses, joiner) + ")"
 	}
 
 	log.Printf("leads query | sql=%s args=%v", query, args)
@@ -1363,28 +1367,69 @@ func removeDateFilters(filters [][]string) [][]string {
 		}
 		cp := make([]string, len(f))
 		copy(cp, f)
+		if isSourceField(field) {
+			cp[0] = "primary_source_id|source_id"
+		}
 		out = append(out, cp)
 	}
 	return out
 }
 
 func withMetaSourceFilter(filters [][]string) [][]string {
-	out := cloneFilters(filters)
-	value := strings.Join(metaSourceIDs, ",")
-	out = append(out, []string{"primary_source_id|source_id", "IN", value})
-	return out
+	return withDefaultSourceFilter(filters, metaSourceIDs)
 }
 
 func withCampaignPerformanceSourceFilter(filters [][]string) [][]string {
-	out := cloneFilters(filters)
 	ids := append([]string{}, metaSourceIDs...)
 	ids = append(ids, googleSourceIDs...)
-	if len(ids) == 0 {
+	return withDefaultSourceFilter(filters, ids)
+}
+
+func withDefaultSourceFilter(filters [][]string, ids []string) [][]string {
+	out := cloneFilters(filters)
+	if len(ids) == 0 || hasExplicitSourceFilter(out) {
 		return out
 	}
 	value := strings.Join(ids, ",")
 	out = append(out, []string{"primary_source_id|source_id", "IN", value})
 	return out
+}
+
+func hasExplicitSourceFilter(filters [][]string) bool {
+	for _, f := range filters {
+		if len(f) < 3 {
+			continue
+		}
+		if isSourceField(strings.TrimSpace(f[0])) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSourceField(field string) bool {
+	switch strings.TrimSpace(strings.ToLower(field)) {
+	case "primary_source_id", "source_id", "primary_source_id|source_id":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitFilterFields(field string) ([]string, error) {
+	parts := strings.Split(field, "|")
+	fields := make([]string, 0, len(parts))
+	for _, rawField := range parts {
+		trimmedField := strings.TrimSpace(rawField)
+		if trimmedField == "" {
+			continue
+		}
+		if !columnPattern.MatchString(trimmedField) {
+			return nil, fmt.Errorf("invalid field %q", trimmedField)
+		}
+		fields = append(fields, trimmedField)
+	}
+	return fields, nil
 }
 
 func sourceIDIn(id int64, ids []string) bool {
