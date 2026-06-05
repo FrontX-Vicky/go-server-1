@@ -621,6 +621,9 @@ func (r *Repo) BuildCampaignPerformance(ctx context.Context, filters [][]string)
 			campaignName = "Undefined"
 		}
 		sourceID := toInt64(row["primary_source_id"])
+		if sourceID == 0 {
+			sourceID = toInt64(row["source_id"])
+		}
 		sourceName := normalizeString(row["primary_source"])
 		platform := platformForSource(sourceID, sourceName)
 		key := campaignKey{Platform: platform, Name: campaignName}
@@ -1235,9 +1238,6 @@ func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 		if field == "" || op == "" {
 			continue // skip empty placeholders
 		}
-		if !columnPattern.MatchString(field) {
-			return "", nil, fmt.Errorf("filter %d: invalid field %q", idx, field)
-		}
 		if _, ok := allowedOperators[op]; !ok {
 			return "", nil, fmt.Errorf("filter %d: operator %q not allowed", idx, op)
 		}
@@ -1249,6 +1249,21 @@ func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 		if op == "IN" {
 			parts := strings.Split(value, ",")
 			placeholders := make([]string, 0, len(parts))
+			fields := strings.Split(field, "|")
+			fieldClauses := make([]string, 0, len(fields))
+			for _, rawField := range fields {
+				trimmedField := strings.TrimSpace(rawField)
+				if trimmedField == "" {
+					continue
+				}
+				if !columnPattern.MatchString(trimmedField) {
+					return "", nil, fmt.Errorf("filter %d: invalid field %q", idx, trimmedField)
+				}
+				fieldClauses = append(fieldClauses, trimmedField)
+			}
+			if len(fieldClauses) == 0 {
+				continue
+			}
 			for _, part := range parts {
 				val := strings.Trim(strings.TrimSpace(part), "'\"")
 				if val == "" {
@@ -1260,8 +1275,23 @@ func buildQuery(filters [][]string, limitOne bool) (string, []any, error) {
 			if len(placeholders) == 0 {
 				continue
 			}
-			query += fmt.Sprintf(" AND %s IN (%s)", field, strings.Join(placeholders, ","))
+			if len(fieldClauses) == 1 {
+				query += fmt.Sprintf(" AND %s IN (%s)", fieldClauses[0], strings.Join(placeholders, ","))
+				continue
+			}
+			orClauses := make([]string, 0, len(fieldClauses))
+			dupArgs := make([]any, 0, len(args)*len(fieldClauses))
+			for _, clauseField := range fieldClauses {
+				orClauses = append(orClauses, fmt.Sprintf("%s IN (%s)", clauseField, strings.Join(placeholders, ",")))
+				dupArgs = append(dupArgs, args[len(args)-len(placeholders):]...)
+			}
+			args = append(args[:len(args)-len(placeholders)], dupArgs...)
+			query += " AND (" + strings.Join(orClauses, " OR ") + ")"
 			continue
+		}
+
+		if !columnPattern.MatchString(field) {
+			return "", nil, fmt.Errorf("filter %d: invalid field %q", idx, field)
 		}
 
 		query += fmt.Sprintf(" AND %s %s ?", field, op)
@@ -1353,7 +1383,7 @@ func withCampaignPerformanceSourceFilter(filters [][]string) [][]string {
 		return out
 	}
 	value := strings.Join(ids, ",")
-	out = append(out, []string{"primary_source_id", "IN", value})
+	out = append(out, []string{"primary_source_id|source_id", "IN", value})
 	return out
 }
 
