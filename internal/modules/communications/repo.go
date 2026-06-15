@@ -101,6 +101,17 @@ func (r *Repository) ensureSchema(ctx context.Context) error {
 			return err
 		}
 	}
+	// Safe column additions — ignore "Duplicate column name" so this is idempotent.
+	alterStatements := []string{
+		`ALTER TABLE email_jobs ADD COLUMN sender_key VARCHAR(120) NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range alterStatements {
+		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
+			if !strings.Contains(err.Error(), "Duplicate column name") {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -139,7 +150,7 @@ func (r *Repository) FindJobByIdempotencyKey(ctx context.Context, key string) (*
 		return nil, nil
 	}
 	row := r.db.QueryRowContext(ctx, `SELECT
-		id, status, reference_type, reference_id, reference_label, module_key,
+		id, status, reference_type, reference_id, reference_label, module_key, COALESCE(sender_key,''),
 		subject, body_html, body_text, to_json, cc_json, bcc_json,
 		COALESCE(triggered_by_user_id,''), COALESCE(triggered_by_name,''), COALESCE(triggered_by_email,''),
 		COALESCE(idempotency_key,''), retry_of_job_id, latest_attempt_id, COALESCE(latest_error,''),
@@ -174,13 +185,13 @@ func (r *Repository) CreateJob(ctx context.Context, req CreateEmailJobRequest, a
 	}
 
 	result, err := tx.ExecContext(ctx, `INSERT INTO email_jobs (
-		status, reference_type, reference_id, reference_label, module_key,
+		status, reference_type, reference_id, reference_label, module_key, sender_key,
 		subject, body_html, body_text, to_json, cc_json, bcc_json,
 		triggered_by_user_id, triggered_by_name, triggered_by_email,
 		idempotency_key, retry_of_job_id, latest_error,
 		queued_at, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		StatusQueued, req.ReferenceType, req.ReferenceID, req.ReferenceLabel, req.ModuleKey,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		StatusQueued, req.ReferenceType, req.ReferenceID, req.ReferenceLabel, req.ModuleKey, req.SenderKey,
 		req.Subject, req.BodyHTML, bodyText, mustJSON(req.To), mustJSON(req.CC), mustJSON(req.BCC),
 		triggeredBy.UserID, triggeredBy.Name, triggeredBy.Email,
 		idempotencyKey, retryOfJobID, "", now, now, now,
@@ -210,7 +221,7 @@ func (r *Repository) CreateJob(ctx context.Context, req CreateEmailJobRequest, a
 
 func (r *Repository) GetJob(ctx context.Context, jobID int64) (*EmailJob, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT
-		id, status, reference_type, reference_id, reference_label, module_key,
+		id, status, reference_type, reference_id, reference_label, module_key, COALESCE(sender_key,''),
 		subject, body_html, body_text, to_json, cc_json, bcc_json,
 		COALESCE(triggered_by_user_id,''), COALESCE(triggered_by_name,''), COALESCE(triggered_by_email,''),
 		COALESCE(idempotency_key,''), retry_of_job_id, latest_attempt_id, COALESCE(latest_error,''),
@@ -241,7 +252,7 @@ func scanJob(scanner interface {
 	var sentAt sql.NullTime
 	var failedAt sql.NullTime
 	if err := scanner.Scan(
-		&job.ID, &job.Status, &job.ReferenceType, &job.ReferenceID, &job.ReferenceLabel, &job.ModuleKey,
+		&job.ID, &job.Status, &job.ReferenceType, &job.ReferenceID, &job.ReferenceLabel, &job.ModuleKey, &job.SenderKey,
 		&job.Subject, &job.BodyHTML, &job.BodyText, &job.To, &job.CC, &job.BCC,
 		&job.TriggeredByUserID, &job.TriggeredByName, &job.TriggeredByEmail,
 		&job.IdempotencyKey, &retryOf, &latestAttempt, &job.LatestError,
@@ -421,6 +432,7 @@ func (r *Repository) CreateRetryJob(ctx context.Context, source *EmailJob) (int6
 		ReferenceID:    source.ReferenceID,
 		ReferenceLabel: source.ReferenceLabel,
 		ModuleKey:      source.ModuleKey,
+		SenderKey:      source.SenderKey,
 		TriggeredBy: &TriggeredBy{
 			UserID: source.TriggeredByUserID,
 			Name:   source.TriggeredByName,

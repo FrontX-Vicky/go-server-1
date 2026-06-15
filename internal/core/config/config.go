@@ -23,6 +23,16 @@ type PrismConfig struct {
 	APIKey    string
 }
 
+// EmailSenderAccount holds SMTP credentials for a single named sender.
+type EmailSenderAccount struct {
+	SMTPHost  string
+	SMTPPort  string
+	SMTPUser  string
+	SMTPPass  string
+	FromEmail string
+	FromName  string
+}
+
 type EmailConfig struct {
 	SMTPHost      string
 	SMTPPort      string
@@ -33,6 +43,10 @@ type EmailConfig struct {
 	AttachmentDir string
 	WorkerPollMS  int
 	MaxAttempts   int
+	// Senders holds named additional sender accounts loaded from EMAIL_SENDERS env.
+	// Key is the sender key (e.g. "support", "billing"). The default sender
+	// (from the EMAIL_* vars above) is always available under the key "default".
+	Senders map[string]EmailSenderAccount
 }
 
 type Config struct {
@@ -110,8 +124,43 @@ func Load() Config {
 			AttachmentDir: getenv("EMAIL_ATTACHMENT_DIR", "/tmp/markx-email-attachments"),
 			WorkerPollMS:  getenvInt("EMAIL_WORKER_POLL_MS", 5000),
 			MaxAttempts:   getenvInt("EMAIL_MAX_ATTEMPTS", 10),
+			Senders:       loadEmailSenders(),
 		},
 	}
+}
+
+// loadEmailSenders reads EMAIL_SENDERS (comma-separated keys) and builds a map
+// of sender accounts from EMAIL_SENDER_{KEY}_* env vars.
+// Example: EMAIL_SENDERS=support,billing
+//
+//	EMAIL_SENDER_SUPPORT_FROM_EMAIL=support@example.com
+//	EMAIL_SENDER_SUPPORT_FROM_NAME=Support Team
+//	EMAIL_SENDER_SUPPORT_SMTP_HOST=smtp.gmail.com
+//	EMAIL_SENDER_SUPPORT_SMTP_PORT=587
+//	EMAIL_SENDER_SUPPORT_SMTP_USER=support@example.com
+//	EMAIL_SENDER_SUPPORT_SMTP_PASS=app-password
+func loadEmailSenders() map[string]EmailSenderAccount {
+	raw := getenv("EMAIL_SENDERS", "")
+	senders := make(map[string]EmailSenderAccount)
+	if strings.TrimSpace(raw) == "" {
+		return senders
+	}
+	for _, key := range strings.Split(raw, ",") {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		prefix := "EMAIL_SENDER_" + strings.ToUpper(key)
+		senders[key] = EmailSenderAccount{
+			SMTPHost:  getenv(prefix+"_SMTP_HOST", ""),
+			SMTPPort:  getenv(prefix+"_SMTP_PORT", "587"),
+			SMTPUser:  getenv(prefix+"_SMTP_USER", ""),
+			SMTPPass:  getenv(prefix+"_SMTP_PASS", ""),
+			FromEmail: getenv(prefix+"_FROM_EMAIL", ""),
+			FromName:  getenv(prefix+"_FROM_NAME", ""),
+		}
+	}
+	return senders
 }
 
 type APIKeys struct {

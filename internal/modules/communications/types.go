@@ -32,6 +32,7 @@ type CreateEmailJobRequest struct {
 	ReferenceID     string           `json:"reference_id"`
 	ReferenceLabel  string           `json:"reference_label,omitempty"`
 	ModuleKey       string           `json:"module_key,omitempty"`
+	SenderKey       string           `json:"sender_key,omitempty"`
 	TriggeredBy     *TriggeredBy     `json:"triggered_by,omitempty"`
 	IdempotencyKey  string           `json:"idempotency_key,omitempty"`
 }
@@ -88,6 +89,7 @@ type EmailJob struct {
 	ReferenceID        string           `json:"reference_id"`
 	ReferenceLabel     string           `json:"reference_label"`
 	ModuleKey          string           `json:"module_key"`
+	SenderKey          string           `json:"sender_key"`
 	Subject            string           `json:"subject"`
 	BodyHTML           string           `json:"body_html"`
 	BodyText           string           `json:"body_text"`
@@ -148,6 +150,17 @@ type CreateEmailJobResponse struct {
 	Status        string `json:"status"`
 	ReferenceType string `json:"reference_type"`
 	ReferenceID   string `json:"reference_id"`
+}
+
+// SenderInfo is the public-safe representation of a configured sender account.
+type SenderInfo struct {
+	Key       string `json:"key"`
+	FromEmail string `json:"from_email"`
+	FromName  string `json:"from_name"`
+}
+
+type ListSendersResponse struct {
+	Senders []SenderInfo `json:"senders"`
 }
 
 type providerPayload struct {

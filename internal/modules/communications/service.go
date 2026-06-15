@@ -9,24 +9,90 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"server_1/internal/core/config"
 )
 
 type EmailService struct {
-	repo       *Repository
-	provider   EmailProvider
-	cfg        config.EmailConfig
+	repo      *Repository
+	providers map[string]EmailProvider // keyed by sender_key; "default" is always present
+	cfg       config.EmailConfig
 }
 
+// NewEmailService builds an EmailService with one provider per configured sender.
+// The default sender (EMAIL_SMTP_HOST / EMAIL_FROM_EMAIL) is registered under "default".
+// Additional senders from EMAIL_SENDERS are registered under their respective keys.
 func NewEmailService(cfg config.EmailConfig) *EmailService {
 	_ = os.MkdirAll(cfg.AttachmentDir, 0o755)
-	return &EmailService{
-		repo:     NewRepository(),
-		provider: NewSMTPProvider(cfg),
-		cfg:      cfg,
+
+	providers := make(map[string]EmailProvider)
+
+	// Always register the default sender.
+	providers["default"] = NewSMTPProvider(cfg)
+
+	// Register named extra senders.
+	for key, account := range cfg.Senders {
+		senderCfg := config.EmailConfig{
+			SMTPHost:  account.SMTPHost,
+			SMTPPort:  account.SMTPPort,
+			SMTPUser:  account.SMTPUser,
+			SMTPPass:  account.SMTPPass,
+			FromEmail: account.FromEmail,
+			FromName:  account.FromName,
+		}
+		providers[key] = NewSMTPProvider(senderCfg)
 	}
+
+	return &EmailService{
+		repo:      NewRepository(),
+		providers: providers,
+		cfg:       cfg,
+	}
+}
+
+// getProvider returns the provider for the given sender_key.
+// Falls back to "default" if the key is empty or not found.
+func (s *EmailService) getProvider(senderKey string) EmailProvider {
+	if senderKey != "" {
+		if p, ok := s.providers[senderKey]; ok {
+			return p
+		}
+	}
+	if p, ok := s.providers["default"]; ok {
+		return p
+	}
+	// Last resort – should never be reached.
+	for _, p := range s.providers {
+		return p
+	}
+	return NewSMTPProvider(s.cfg)
+}
+
+// ListSenders returns public-safe info (no credentials) for every configured sender.
+func (s *EmailService) ListSenders() *ListSendersResponse {
+	senders := make([]SenderInfo, 0, len(s.providers))
+	for key, provider := range s.providers {
+		if smtpP, ok := provider.(*SMTPProvider); ok {
+			senders = append(senders, SenderInfo{
+				Key:       key,
+				FromEmail: smtpP.cfg.FromEmail,
+				FromName:  smtpP.cfg.FromName,
+			})
+		}
+	}
+	// Stable sort: "default" first, then alphabetical.
+	sort.Slice(senders, func(i, j int) bool {
+		if senders[i].Key == "default" {
+			return true
+		}
+		if senders[j].Key == "default" {
+			return false
+		}
+		return senders[i].Key < senders[j].Key
+	})
+	return &ListSendersResponse{Senders: senders}
 }
 
 func (s *EmailService) CreateJob(ctx context.Context, req CreateEmailJobRequest) (*CreateEmailJobResponse, error) {
@@ -173,7 +239,7 @@ func (s *EmailService) ProcessNextQueuedJob(ctx context.Context) (bool, error) {
 		}
 		return true, err
 	}
-	result, sendErr := s.provider.Send(payload)
+	result, sendErr := s.getProvider(job.SenderKey).Send(payload)
 	if err := s.repo.CompleteAttempt(ctx, job, result, sendErr); err != nil {
 		return true, err
 	}
@@ -181,6 +247,16 @@ func (s *EmailService) ProcessNextQueuedJob(ctx context.Context) (bool, error) {
 }
 
 func (s *EmailService) buildProviderPayload(job *EmailJob) (providerPayload, error) {
+	// Select the right sender config for From: headers.
+	fromEmail := s.cfg.FromEmail
+	fromName := s.cfg.FromName
+	if provider := s.getProvider(job.SenderKey); provider != nil {
+		if smtpP, ok := provider.(*SMTPProvider); ok {
+			fromEmail = smtpP.cfg.FromEmail
+			fromName = smtpP.cfg.FromName
+		}
+	}
+
 	attachments := make([]providerAttachment, 0, len(job.Attachments))
 	for _, attachment := range job.Attachments {
 		content, err := os.ReadFile(attachment.StorageKey)
@@ -194,8 +270,8 @@ func (s *EmailService) buildProviderPayload(job *EmailJob) (providerPayload, err
 		})
 	}
 	return providerPayload{
-		FromName:    s.cfg.FromName,
-		FromEmail:   s.cfg.FromEmail,
+		FromName:    fromName,
+		FromEmail:   fromEmail,
 		To:          parseRecipients(job.To),
 		CC:          parseRecipients(job.CC),
 		BCC:         parseRecipients(job.BCC),
