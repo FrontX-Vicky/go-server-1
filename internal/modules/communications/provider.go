@@ -63,10 +63,12 @@ func (p *SMTPProvider) Send(payload providerPayload) (*providerResult, error) {
 	}
 
 	var auth smtp.Auth
+	envelopeSender := p.cfg.FromEmail
 	if strings.TrimSpace(p.cfg.SMTPUser) != "" {
 		auth = smtp.PlainAuth("", p.cfg.SMTPUser, p.cfg.SMTPPass, p.cfg.SMTPHost)
+		envelopeSender = p.cfg.SMTPUser
 	}
-	if err := smtp.SendMail(addr, auth, p.cfg.FromEmail, recipients, raw); err != nil {
+	if err := smtp.SendMail(addr, auth, envelopeSender, recipients, raw); err != nil {
 		return nil, err
 	}
 	return &providerResult{
