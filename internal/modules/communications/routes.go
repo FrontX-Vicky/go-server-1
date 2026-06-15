@@ -11,6 +11,7 @@ func MountRoutes(v1 *gin.RouterGroup, checker prism.Checker, cfg config.Config) 
 	g := v1.Group("/communications/email", prism.RequirePrism(checker, "report:read"))
 	ctl := &Controller{Service: NewEmailService(cfg.Email)}
 
+	g.GET("/senders", ctl.ListSenders)
 	g.POST("/jobs", ctl.CreateJob)
 	g.GET("/jobs/:jobId", ctl.GetJob)
 	g.POST("/jobs/:jobId/retry", ctl.RetryJob)

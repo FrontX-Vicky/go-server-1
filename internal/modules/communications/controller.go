@@ -93,3 +93,8 @@ func (ctl *Controller) GetReferenceJobs(c *gin.Context) {
 	}
 	httpx.OK(c, gin.H{"data": resp})
 }
+
+func (ctl *Controller) ListSenders(c *gin.Context) {
+	resp := ctl.Service.ListSenders()
+	httpx.OK(c, gin.H{"data": resp})
+}
