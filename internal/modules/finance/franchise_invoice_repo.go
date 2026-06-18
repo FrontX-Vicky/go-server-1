@@ -504,6 +504,84 @@ func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoic
 	return list, rows.Err()
 }
 
+// UpdateSubInvoiceProforma updates a sub-invoice proforma flag and mirrors it to the linked sales invoice.
+func (r *FranchiseInvoiceRepo) UpdateSubInvoiceProforma(ctx context.Context, subInvoiceID int64, proforma string) (err error) {
+	if subInvoiceID <= 0 {
+		return fmt.Errorf("valid sub_invoice_id is required")
+	}
+
+	proformaValue := "0"
+	documentTypeCode := "INV"
+	if isTruthyFlag(proforma) {
+		proformaValue = "1"
+		documentTypeCode = "PROFORMA"
+	}
+
+	masterCols, _, colsErr := r.loadSalesInvoiceCols(ctx)
+	if colsErr != nil {
+		masterCols = map[string]bool{}
+	}
+
+	tx, err := r.db1.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE franchise_invoice_sub SET proforma = ?, modified_at = NOW() WHERE id = ? AND park = 0`,
+		proformaValue,
+		subInvoiceID,
+	); err != nil {
+		return fmt.Errorf("update franchise_invoice_sub.proforma: %w", err)
+	}
+
+	var salesInvoiceID int64
+	if err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(sales_invoice_id,0) FROM franchise_invoice_sub WHERE id = ? AND park = 0 LIMIT 1`,
+		subInvoiceID,
+	).Scan(&salesInvoiceID); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("sub-invoice %d not found", subInvoiceID)
+		}
+		return fmt.Errorf("load sub-invoice sales invoice link: %w", err)
+	}
+
+	if salesInvoiceID > 0 {
+		sets := []string{}
+		args := []any{}
+		if masterCols["proforma"] {
+			sets = append(sets, "proforma = ?")
+			args = append(args, proformaValue)
+		}
+		if masterCols["document_type_code"] {
+			sets = append(sets, "document_type_code = ?")
+			args = append(args, documentTypeCode)
+		}
+		if masterCols["modified_at"] {
+			sets = append(sets, "modified_at = NOW()")
+		}
+		if len(sets) > 0 {
+			args = append(args, salesInvoiceID)
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE sales_invoice_master SET `+strings.Join(sets, ", ")+` WHERE id = ?`,
+				args...,
+			); err != nil {
+				return fmt.Errorf("update linked sales_invoice_master proforma flag: %w", err)
+			}
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // DeleteSubInvoice soft-deletes a sub-invoice (park=1) in DB1.
 func (r *FranchiseInvoiceRepo) DeleteSubInvoice(ctx context.Context, subInvoiceID int64) error {
 	_, err := r.db1.ExecContext(ctx,
@@ -1321,7 +1399,7 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	// 1. Fetch sub-invoice.
 	subRow := r.db1.QueryRowContext(ctx,
 		`SELECT id, COALESCE(parent_invoice_id,0), COALESCE(owner_name_id,0), COALESCE(invoice_date,'0000-00-00'),
-		        COALESCE(grant_total,0), COALESCE(other_items,''), COALESCE(item_name,'')
+		        COALESCE(grant_total,0), COALESCE(other_items,''), COALESCE(item_name,''), COALESCE(proforma,'0')
 		 FROM franchise_invoice_sub WHERE id = ? AND park = 0`,
 		subInvoiceID,
 	)
@@ -1333,8 +1411,9 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		grantTotal      float64
 		otherItems      string
 		itemName        string
+		proforma        string
 	)
-	if err := subRow.Scan(&subID, &parentInvoiceID, &ownerID, &invoiceDate, &grantTotal, &otherItems, &itemName); err != nil {
+	if err := subRow.Scan(&subID, &parentInvoiceID, &ownerID, &invoiceDate, &grantTotal, &otherItems, &itemName, &proforma); err != nil {
 		return 0, fmt.Errorf("sub-invoice %d not found: %w", subInvoiceID, err)
 	}
 	if invoiceDate == "" || invoiceDate == "0000-00-00" {
@@ -1475,7 +1554,12 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		"source_type":            "franchisee_sub_invoice",
 		"source_id":              subID,
 		"document_number":        invoiceNo,
-		"document_type_code":     "INV",
+		"document_type_code": func() string {
+			if isTruthyFlag(proforma) {
+				return "PROFORMA"
+			}
+			return "INV"
+		}(),
 		"document_date":          invoiceDate,
 		"customer_display_name":  owner.OwnerDisplayName,
 		"customer_company_name":  owner.OwnerCompanyName,
@@ -1564,6 +1648,13 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	// Store annexure rows if we fetched them successfully.
 	if annexureJSON != "" && masterCols["annexure_json"] {
 		fields["annexure_json"] = annexureJSON
+	}
+	if masterCols["proforma"] {
+		if isTruthyFlag(proforma) {
+			fields["proforma"] = "1"
+		} else {
+			fields["proforma"] = "0"
+		}
 	}
 
 	// 9. Filter to only existing columns.
@@ -1690,7 +1781,11 @@ func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocumentWithMode(ctx 
 	query.Set("test", "pdf_test")
 	query.Set("view", "1")
 	query.Set("email_body_filename", "salesInvoice")
-	query.Set("pdf_body_filename", "salesInvoice")
+	if proforma, _ := r.isSalesInvoiceProforma(ctx, salesInvoiceID); proforma {
+		query.Set("pdf_body_filename", "salesInvoiceProforma")
+	} else {
+		query.Set("pdf_body_filename", "salesInvoice")
+	}
 	query.Set("folder_name", "sales_invoices")
 	query.Set("email_table_name", "sales_invoice_master")
 	query.Set("pdf_name", pdfName)
@@ -1742,6 +1837,40 @@ func (r *FranchiseInvoiceRepo) persistLegacyB2BSalesInvoiceDocumentWithMode(ctx 
 		return "", fmt.Errorf("update sales_invoice_master.document: %w", err)
 	}
 	return fullPath, nil
+}
+
+func isTruthyFlag(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "y"
+}
+
+func (r *FranchiseInvoiceRepo) isSalesInvoiceProforma(ctx context.Context, salesInvoiceID int64) (bool, error) {
+	if salesInvoiceID <= 0 {
+		return false, nil
+	}
+	masterCols, _, err := r.loadSalesInvoiceCols(ctx)
+	if err != nil {
+		return false, err
+	}
+	if masterCols["proforma"] {
+		var proforma string
+		row := r.db1.QueryRowContext(ctx, `SELECT COALESCE(proforma,'0') FROM sales_invoice_master WHERE id = ? LIMIT 1`, salesInvoiceID)
+		if err := row.Scan(&proforma); err != nil {
+			return false, err
+		}
+		if isTruthyFlag(proforma) {
+			return true, nil
+		}
+	}
+	if masterCols["document_type_code"] {
+		var documentType string
+		row := r.db1.QueryRowContext(ctx, `SELECT COALESCE(document_type_code,'') FROM sales_invoice_master WHERE id = ? LIMIT 1`, salesInvoiceID)
+		if err := row.Scan(&documentType); err != nil {
+			return false, err
+		}
+		return strings.EqualFold(strings.TrimSpace(documentType), "PROFORMA"), nil
+	}
+	return false, nil
 }
 
 func (r *FranchiseInvoiceRepo) GetSalesInvoiceNumber(ctx context.Context, salesInvoiceID int64) (string, error) {

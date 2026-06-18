@@ -173,6 +173,21 @@ func (ctl *FranchiseInvoiceController) ListSubInvoices(c *gin.Context) {
 	httpx.OK(c, gin.H{"data": list})
 }
 
+// UpdateSubInvoiceProforma handles PUT /finance/franchise-invoice/sub-invoice
+func (ctl *FranchiseInvoiceController) UpdateSubInvoiceProforma(c *gin.Context) {
+	var req UpdateSubInvoiceProformaRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.SubInvoiceID <= 0 {
+		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "valid sub_invoice_id is required"})
+		return
+	}
+
+	if err := ctl.Repo.UpdateSubInvoiceProforma(c.Request.Context(), req.SubInvoiceID, req.Proforma); err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	httpx.OK(c, gin.H{"message": "Sub-invoice proforma flag updated successfully"})
+}
+
 // DeleteSubInvoice handles DELETE /finance/franchise-invoice/sub-invoice
 func (ctl *FranchiseInvoiceController) DeleteSubInvoice(c *gin.Context) {
 	subID, err := strconv.ParseInt(c.Query("sub_invoice_id"), 10, 64)
