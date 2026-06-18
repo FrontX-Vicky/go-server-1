@@ -124,6 +124,11 @@ type CreateSubInvoiceRequest struct {
 	ItemLabel       string  `json:"item_label"`
 }
 
+type UpdateSubInvoiceProformaRequest struct {
+	SubInvoiceID int64  `json:"sub_invoice_id"`
+	Proforma     string `json:"proforma"`
+}
+
 type RegenerateSalesInvoiceDocumentRequest struct {
 	SalesInvoiceID int64  `json:"sales_invoice_id"`
 	SalesInvoiceNo string `json:"sales_invoice_no"`
