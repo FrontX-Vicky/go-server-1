@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,6 +11,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"server_1/internal/core/config"
 	"server_1/internal/core/db"
@@ -37,6 +39,15 @@ func Run() {
 	defer db.CloseAll()
 
 	log.Info().Msg("worker started")
+
+	// Expose Prometheus metrics on port 2112
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Info().Msg("Starting Prometheus metrics server on :2112")
+		if err := http.ListenAndServe(":2112", nil); err != nil {
+			log.Error().Err(err).Msg("Prometheus metrics server failed")
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
