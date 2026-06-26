@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	ginprometheus "github.com/zsais/go-gin-prometheus"
 	"server_1/internal/core/config"
 	"server_1/internal/core/prism"
 	"server_1/internal/modules/communications"
@@ -19,6 +20,11 @@ import (
 
 func Build(cfg config.Config) *gin.Engine {
 	r := gin.New()
+	
+	// Add Prometheus monitoring
+	p := ginprometheus.NewPrometheus("gin")
+	p.Use(r)
+	
 	// Apply recovery, logging, and a conservative request timeout.
 	// Keep this lower than server WriteTimeout to ensure graceful cancellations.
 	r.Use(gin.Recovery(), RequestLogger(), WithTimeout(20*time.Second))
