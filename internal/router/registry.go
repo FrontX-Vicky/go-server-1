@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	ginprometheus "github.com/zsais/go-gin-prometheus"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"server_1/internal/core/config"
 	"server_1/internal/core/prism"
 	"server_1/internal/modules/communications"
@@ -24,6 +25,9 @@ func Build(cfg config.Config) *gin.Engine {
 	// Add Prometheus monitoring
 	p := ginprometheus.NewPrometheus("gin")
 	p.Use(r)
+	
+	// Apply OpenTelemetry middleware
+	r.Use(otelgin.Middleware("markx-go-api"))
 	
 	// Apply recovery, logging, and a conservative request timeout.
 	// Keep this lower than server WriteTimeout to ensure graceful cancellations.
