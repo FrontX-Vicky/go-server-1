@@ -198,6 +198,7 @@ SELECT
 						) fd ON fd.invoice_id = fi.invoice_id
 					WHERE
 						i.created_at >= '2024-01-01'
+						AND i.created_at <= CURRENT_TIMESTAMP
 						AND i.park = 0
 						AND c.park = 0
 						AND f.followup IN (0, 2)
@@ -390,6 +391,7 @@ SELECT
 						) fd ON fd.invoice_id = fi.invoice_id
 					WHERE
 						i.created_at >= '2024-01-01'
+						AND i.created_at <= CURRENT_TIMESTAMP
 						AND i.park = 0
 						AND c.park = 0
 						AND f.followup IN (0, 2)
@@ -402,7 +404,8 @@ SELECT
         WHERE
             counsellors_incentives = 1 AND park = 0
     ) OR b.type = 'COCO'
-)`
+)
+ORDER BY doi_created DESC, contact_id DESC`
 
 func (r *Repo) InquiryDemoFollowup(ctx context.Context) ([]orderedRow, error) {
 	rows, err := r.db.QueryContext(ctx, inquiryDemoFollowupSQL)
