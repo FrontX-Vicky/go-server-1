@@ -369,30 +369,6 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	if strings.TrimSpace(req.ItemLabel) != "" {
 		itemName = strings.TrimSpace(req.ItemLabel)
 	}
-	// Persist annexure_json on sub-invoice so sales invoice creation can reuse it directly.
-	var annexureJSON string
-	if req.ParentInvoiceID > 0 {
-		if transferSectionKey != "" {
-			if transferAnnexure, transferErr := r.GetMemberTransferAnnexure(ctx, ownerNameID, startDate, endDate); transferErr == nil && transferAnnexure != nil {
-				if section, ok := pickAnnexureSection(transferAnnexure, transferSectionKey); ok {
-					payload := &MemberTransferAnnexure{
-						Title:    transferAnnexure.Title,
-						Sections: []AnnexureSection{section},
-					}
-					if wrapped, jsonErr := encodeAnnexureJSON("member_transfer", payload); jsonErr == nil {
-						annexureJSON = wrapped
-					}
-				}
-			}
-		} else if isRoyaltyItem {
-			if annexureData, annexureErr := r.GetInvoiceList(ctx, req.ParentInvoiceID); annexureErr == nil && annexureData != nil {
-				if wrapped, jsonErr := encodeAnnexureJSON("invoice_list", annexureData); jsonErr == nil {
-					annexureJSON = wrapped
-				}
-			}
-		}
-	}
-
 	now := time.Now().Format("2006-01-02 15:04:05")
 	insertCols := []string{
 		"parent_invoice_id", "invoice", "branch", "owner_name_id", "month_year", "start_date", "end_date",
@@ -405,13 +381,6 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 		invoiceDate, totalSale, royality, cgst, sgst, igst, calcIGST,
 		itemName, itemHSN, itemCGSTRate, itemSGSTRate, itemIGSTRate, itemGSTAmount,
 		otherItems, grantTotal, proforma, 0, now, 0, now,
-	}
-
-	if subCols, colsErr := r.loadSubInvoiceCols(ctx); colsErr == nil && annexureJSON != "" {
-		if subCols["annexure_json"] {
-			insertCols = append(insertCols, "annexure_json")
-			insertArgs = append(insertArgs, annexureJSON)
-		}
 	}
 
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(insertCols)), ",")
@@ -1328,6 +1297,55 @@ func (r *FranchiseInvoiceRepo) fetchSupplierProfile(ctx context.Context, ownerID
 	}, nil
 }
 
+func (r *FranchiseInvoiceRepo) buildSubInvoiceAnnexureJSON(ctx context.Context, parentInvoiceID, ownerID int64, itemLabel string) (string, error) {
+	if parentInvoiceID <= 0 {
+		return "", nil
+	}
+
+	label := strings.TrimSpace(itemLabel)
+	transferSectionKey := transferSectionKeyFromParticular(label)
+	if transferSectionKey != "" {
+		var parentOwnerID int64
+		var startDate, endDate string
+		row := r.db1.QueryRowContext(ctx,
+			`SELECT COALESCE(owner_name_id,0), COALESCE(start_date,''), COALESCE(end_date,'')
+			 FROM franchise_invoice
+			 WHERE id = ? AND park = 0
+			 LIMIT 1`,
+			parentInvoiceID,
+		)
+		if err := row.Scan(&parentOwnerID, &startDate, &endDate); err != nil {
+			return "", fmt.Errorf("load parent invoice %d for transfer annexure: %w", parentInvoiceID, err)
+		}
+		if parentOwnerID > 0 {
+			ownerID = parentOwnerID
+		}
+		transferAnnexure, err := r.GetMemberTransferAnnexure(ctx, ownerID, startDate, endDate)
+		if err != nil || transferAnnexure == nil {
+			return "", err
+		}
+		section, ok := pickAnnexureSection(transferAnnexure, transferSectionKey)
+		if !ok {
+			return "", nil
+		}
+		payload := &MemberTransferAnnexure{
+			Title:    transferAnnexure.Title,
+			Sections: []AnnexureSection{section},
+		}
+		return encodeAnnexureJSON("member_transfer", payload)
+	}
+
+	if isRoyaltyParticular(label) {
+		annexureData, err := r.GetInvoiceList(ctx, parentInvoiceID)
+		if err != nil || annexureData == nil {
+			return "", err
+		}
+		return encodeAnnexureJSON("invoice_list", annexureData)
+	}
+
+	return "", nil
+}
+
 func encodeAnnexureJSON(annexureType string, payload any) (string, error) {
 	envelope := map[string]any{
 		"type":    strings.TrimSpace(annexureType),
@@ -1454,25 +1472,25 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		return 0, err
 	}
 
-		// 5. Parse line items.
-		lineItems := parseFranchiseLineItems(otherItems, grantTotal, itemName)
+	// 5. Parse line items.
+	lineItems := parseFranchiseLineItems(otherItems, grantTotal, itemName)
 
-		// 5b. Fetch annexure (invoice list) from the parent franchise_invoice.
-		// Store as JSON in annexure_json so the invoice print can render Annexure 1.
-		annexureJSON := strings.TrimSpace(storedAnnexureJSON)
+	// 5b. Fetch annexure from the parent franchise_invoice when it is needed for printing.
+	annexureJSON := strings.TrimSpace(storedAnnexureJSON)
 	if annexureJSON == "" && parentInvoiceID > 0 {
-		annexureData, annexureErr := r.GetInvoiceList(ctx, parentInvoiceID)
-		if annexureErr == nil && annexureData != nil {
-			if wrapped, jsonErr := encodeAnnexureJSON("invoice_list", annexureData); jsonErr == nil {
-				annexureJSON = wrapped
-			}
+		annexureLabel := strings.TrimSpace(itemName)
+		if annexureLabel == "" {
+			annexureLabel, _ = extractFirstParticular(otherItems)
+		}
+		if wrapped, annexureErr := r.buildSubInvoiceAnnexureJSON(ctx, parentInvoiceID, ownerID, annexureLabel); annexureErr == nil {
+			annexureJSON = wrapped
 		}
 		// Non-fatal: if annexure fetch fails the invoice is still created.
 	}
 
-		// 6. Resolve supplier branch profile and tax mode before computing invoice totals.
-		// Franchise sub-invoice sales invoices are booked to bid 35 in test mode, else bid 27.
-		branchID := int64(27)
+	// 6. Resolve supplier branch profile and tax mode before computing invoice totals.
+	// Franchise sub-invoice sales invoices are booked to bid 35 in test mode, else bid 27.
+	branchID := int64(27)
 	if testMode {
 		branchID = 35
 	}
