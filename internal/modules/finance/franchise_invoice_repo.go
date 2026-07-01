@@ -1349,6 +1349,64 @@ func (r *FranchiseInvoiceRepo) buildSubInvoiceAnnexureJSON(ctx context.Context, 
 	return "", nil
 }
 
+func (r *FranchiseInvoiceRepo) ensureSalesInvoiceAnnexureJSON(ctx context.Context, salesInvoiceID int64) {
+	masterCols, _, err := r.loadSalesInvoiceCols(ctx)
+	if err != nil || !masterCols["annexure_json"] || !masterCols["source_id"] {
+		return
+	}
+
+	sourceTypeExpr := `''`
+	if masterCols["source_type"] {
+		sourceTypeExpr = `COALESCE(source_type,'')`
+	}
+	row := r.db1.QueryRowContext(ctx,
+		`SELECT COALESCE(source_id,0), `+sourceTypeExpr+`, COALESCE(annexure_json,'')
+		 FROM sales_invoice_master
+		 WHERE id = ? AND park = 0
+		 LIMIT 1`,
+		salesInvoiceID,
+	)
+	var subInvoiceID int64
+	var sourceType, existingAnnexure string
+	if err := row.Scan(&subInvoiceID, &sourceType, &existingAnnexure); err != nil {
+		return
+	}
+	if strings.TrimSpace(existingAnnexure) != "" || subInvoiceID <= 0 {
+		return
+	}
+	if sourceType != "" && sourceType != "franchisee_sub_invoice" {
+		return
+	}
+
+	subRow := r.db1.QueryRowContext(ctx,
+		`SELECT COALESCE(parent_invoice_id,0), COALESCE(owner_name_id,0),
+		        COALESCE(other_items,''), COALESCE(item_name,'')
+		 FROM franchise_invoice_sub
+		 WHERE id = ? AND park = 0
+		 LIMIT 1`,
+		subInvoiceID,
+	)
+	var parentInvoiceID, ownerID int64
+	var otherItems, itemName string
+	if err := subRow.Scan(&parentInvoiceID, &ownerID, &otherItems, &itemName); err != nil {
+		return
+	}
+	label := strings.TrimSpace(itemName)
+	if label == "" {
+		label, _ = extractFirstParticular(otherItems)
+	}
+	annexureJSON, err := r.buildSubInvoiceAnnexureJSON(ctx, parentInvoiceID, ownerID, label)
+	if err != nil || strings.TrimSpace(annexureJSON) == "" {
+		return
+	}
+	if _, err := r.db1.ExecContext(ctx,
+		`UPDATE sales_invoice_master SET annexure_json = ? WHERE id = ? AND park = 0`,
+		annexureJSON, salesInvoiceID,
+	); err != nil {
+		log.Printf("backfill sales invoice annexure failed for sales_invoice_id=%d: %v", salesInvoiceID, err)
+	}
+}
+
 func encodeAnnexureJSON(annexureType string, payload any) (string, error) {
 	envelope := map[string]any{
 		"type":    strings.TrimSpace(annexureType),
@@ -1385,7 +1443,10 @@ func extractFirstParticular(raw string) (string, *ParticularItem) {
 
 func isRoyaltyParticular(label string) bool {
 	v := strings.ToLower(strings.TrimSpace(label))
-	return v == "royalty" || v == "royality"
+	return v == "royalty" ||
+		v == "royality" ||
+		strings.HasPrefix(v, "royalty ") ||
+		strings.HasPrefix(v, "royality ")
 }
 
 func transferSectionKeyFromParticular(label string) string {
@@ -1929,6 +1990,7 @@ func (r *FranchiseInvoiceRepo) RegenerateSalesInvoiceDocument(ctx context.Contex
 			return "", "", err
 		}
 	}
+	r.ensureSalesInvoiceAnnexureJSON(ctx, salesInvoiceID)
 	attachmentPath, err := r.persistLegacyB2BSalesInvoiceDocumentWithMode(ctx, salesInvoiceID, resolvedInvoiceNo, true)
 	if err != nil {
 		return "", "", err
