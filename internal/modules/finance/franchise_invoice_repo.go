@@ -1434,6 +1434,9 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	if err := subRow.Scan(&subID, &parentInvoiceID, &ownerID, &invoiceDate, &grantTotal, &otherItems, &itemName, &proforma); err != nil {
 		return 0, fmt.Errorf("sub-invoice %d not found: %w", subInvoiceID, err)
 	}
+	if isTruthyFlag(proforma) {
+		testMode = true
+	}
 	if invoiceDate == "" || invoiceDate == "0000-00-00" {
 		invoiceDate = time.Now().Format("2006-01-02")
 	}
