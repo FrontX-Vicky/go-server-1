@@ -349,8 +349,8 @@ func (r *Repository) ListJobSummaries(ctx context.Context, filters EmailJobListF
 		args = append(args, filters.ReferenceType)
 	}
 	if filters.ReferenceID != "" {
-		where = append(where, "reference_id = ?")
-		args = append(args, filters.ReferenceID)
+		where = append(where, "(reference_id = ? OR FIND_IN_SET(?, reference_id) > 0)")
+		args = append(args, filters.ReferenceID, filters.ReferenceID)
 	}
 	if filters.DateFrom != "" {
 		where = append(where, "DATE(created_at) >= ?")

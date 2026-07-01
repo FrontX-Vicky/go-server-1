@@ -407,7 +407,10 @@ func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoic
 			SELECT ej.status
 			FROM email_jobs ej
 			WHERE ej.reference_type = 'sales_invoice'
-			  AND ej.reference_id = CAST(s.sales_invoice_id AS CHAR)
+			  AND (
+			    ej.reference_id = CAST(s.sales_invoice_id AS CHAR)
+			    OR FIND_IN_SET(CAST(s.sales_invoice_id AS CHAR), ej.reference_id) > 0
+			  )
 			ORDER BY ej.id DESC
 			LIMIT 1
 		),'')`
@@ -1433,6 +1436,9 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	)
 	if err := subRow.Scan(&subID, &parentInvoiceID, &ownerID, &invoiceDate, &grantTotal, &otherItems, &itemName, &proforma); err != nil {
 		return 0, fmt.Errorf("sub-invoice %d not found: %w", subInvoiceID, err)
+	}
+	if isTruthyFlag(proforma) {
+		testMode = true
 	}
 	if invoiceDate == "" || invoiceDate == "0000-00-00" {
 		invoiceDate = time.Now().Format("2006-01-02")
