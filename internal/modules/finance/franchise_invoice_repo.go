@@ -1542,18 +1542,10 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 	// 5. Parse line items.
 	lineItems := parseFranchiseLineItems(otherItems, grantTotal, itemName)
 
-	// 5b. Fetch annexure from the parent franchise_invoice when it is needed for printing.
+	// 5b. Use a precomputed annexure if one exists. Heavy annexure generation
+	// happens during document regeneration so invoice creation does not consume
+	// the request deadline before the core sales invoice is saved.
 	annexureJSON := strings.TrimSpace(storedAnnexureJSON)
-	if annexureJSON == "" && parentInvoiceID > 0 {
-		annexureLabel := strings.TrimSpace(itemName)
-		if annexureLabel == "" {
-			annexureLabel, _ = extractFirstParticular(otherItems)
-		}
-		if wrapped, annexureErr := r.buildSubInvoiceAnnexureJSON(ctx, parentInvoiceID, ownerID, annexureLabel); annexureErr == nil {
-			annexureJSON = wrapped
-		}
-		// Non-fatal: if annexure fetch fails the invoice is still created.
-	}
 
 	// 6. Resolve supplier branch profile and tax mode before computing invoice totals.
 	// Franchise sub-invoice sales invoices are booked to bid 35 in test mode, else bid 27.
@@ -1830,9 +1822,14 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		return 0, err
 	}
 	if strings.EqualFold(strings.TrimSpace(owner.SupplyTypeCode), "B2B") && masterCols["document"] {
-		if _, persistErr := r.persistLegacyB2BSalesInvoiceDocument(ctx, salesInvoiceID, invoiceNo); persistErr != nil {
-			log.Printf("persist legacy b2b sales invoice document failed for sales_invoice_id=%d: %v", salesInvoiceID, persistErr)
-		}
+		go func(salesInvoiceID int64, invoiceNo string) {
+			docCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			r.ensureSalesInvoiceAnnexureJSON(docCtx, salesInvoiceID)
+			if _, persistErr := r.persistLegacyB2BSalesInvoiceDocument(docCtx, salesInvoiceID, invoiceNo); persistErr != nil {
+				log.Printf("persist legacy b2b sales invoice document failed for sales_invoice_id=%d: %v", salesInvoiceID, persistErr)
+			}
+		}(salesInvoiceID, invoiceNo)
 	}
 	return salesInvoiceID, nil
 }
