@@ -39,6 +39,7 @@ SELECT
 						i.allocation_date,
 						f.interest_string AS interest_string,
 						d.start_date AS demo_date,
+						d.id AS demo_id,
 						dfr.demo_attended,
 						COALESCE(fp.first_payment_date, NULL) AS date_of_conversion,
 						CASE
@@ -210,7 +211,9 @@ SELECT
 						i.created_at >= '2024-01-01'
 						AND i.park = 0
 						AND c.park = 0
+						AND d.start_date = '2026-06-22'
 						AND f.master IN (0, 2)
+						AND d.id = 3141
 						AND ((i.bid IN(
     SELECT
         id
