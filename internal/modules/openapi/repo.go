@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -229,8 +230,15 @@ SELECT
     ) OR b.type = 'COCO'
 ))`
 
-func (r *Repo) InquiryDemoFollowup(ctx context.Context) ([]orderedRow, error) {
-	rows, err := r.db.QueryContext(ctx, inquiryDemoFollowupSQL)
+func (r *Repo) InquiryDemoFollowup(ctx context.Context, limit, offset int, usePagination bool) ([]orderedRow, error) {
+	query := inquiryDemoFollowupSQL
+	args := make([]any, 0, 2)
+	if usePagination {
+		query = fmt.Sprintf("%s ORDER BY doi_created DESC, contact_id DESC LIMIT ? OFFSET ?", query)
+		args = append(args, limit, offset)
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

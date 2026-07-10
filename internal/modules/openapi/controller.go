@@ -2,6 +2,7 @@ package openapi
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +24,13 @@ func (ctl *Controller) Health(c *gin.Context) {
 }
 
 func (ctl *Controller) InquiryDemoFollowup(c *gin.Context) {
-	rows, err := ctl.Repo.InquiryDemoFollowup(c.Request.Context())
+	limit, offset, usePagination, err := parseOptionalPagination(c)
+	if err != nil {
+		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	rows, err := ctl.Repo.InquiryDemoFollowup(c.Request.Context(), limit, offset, usePagination)
 	if err != nil {
 		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -130,4 +137,52 @@ func isTruthyQuery(value string) bool {
 	default:
 		return false
 	}
+}
+
+func parseOptionalPagination(c *gin.Context) (limit int, offset int, usePagination bool, err error) {
+	rawLimit := strings.TrimSpace(c.Query("limit"))
+	rawOffset := strings.TrimSpace(c.Query("offset"))
+	if rawLimit == "" && rawOffset == "" {
+		return 0, 0, false, nil
+	}
+
+	limit = 10000
+	offset = 0
+
+	if rawLimit != "" {
+		parsed, parseErr := strconv.Atoi(rawLimit)
+		if parseErr != nil || parsed <= 0 {
+			return 0, 0, false, errInvalidQueryValue("limit")
+		}
+		if parsed > 10000 {
+			return 0, 0, false, errQueryTooLarge("limit", 10000)
+		}
+		limit = parsed
+	}
+
+	if rawOffset != "" {
+		parsed, parseErr := strconv.Atoi(rawOffset)
+		if parseErr != nil || parsed < 0 {
+			return 0, 0, false, errInvalidQueryValue("offset")
+		}
+		offset = parsed
+	}
+
+	return limit, offset, true, nil
+}
+
+func errInvalidQueryValue(name string) error {
+	return &queryParamError{message: name + " must be a valid integer"}
+}
+
+func errQueryTooLarge(name string, max int) error {
+	return &queryParamError{message: name + " must be less than or equal to " + strconv.Itoa(max)}
+}
+
+type queryParamError struct {
+	message string
+}
+
+func (e *queryParamError) Error() string {
+	return e.message
 }
