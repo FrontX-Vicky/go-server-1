@@ -439,6 +439,7 @@ func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoic
 	defer rows.Close()
 
 	list := []SubInvoice{}
+	linkedSalesInvoiceIDs := []int64{}
 	for rows.Next() {
 		var (
 			s            SubInvoice
@@ -474,9 +475,23 @@ func (r *FranchiseInvoiceRepo) ListSubInvoices(ctx context.Context, parentInvoic
 		}
 
 		list = append(list, s)
+		if s.SalesInvoiceID > 0 {
+			linkedSalesInvoiceIDs = append(linkedSalesInvoiceIDs, s.SalesInvoiceID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, salesInvoiceID := range linkedSalesInvoiceIDs {
+		if err := r.repairSalesInvoiceItemCompatibility(ctx, salesInvoiceID); err != nil {
+			return nil, fmt.Errorf("repair sales invoice %d item compatibility: %w", salesInvoiceID, err)
+		}
 	}
 
-	return list, rows.Err()
+	return list, nil
 }
 
 // UpdateSubInvoiceProforma updates a sub-invoice proforma flag and mirrors it to the linked sales invoice.
@@ -1067,6 +1082,37 @@ func (r *FranchiseInvoiceRepo) loadSalesInvoiceCols(ctx context.Context) (master
 		siItemCols = map[string]bool{}
 	}
 	return siMasterCols, siItemCols, nil
+}
+
+func (r *FranchiseInvoiceRepo) repairSalesInvoiceItemCompatibility(ctx context.Context, salesInvoiceID int64) error {
+	if salesInvoiceID <= 0 {
+		return nil
+	}
+	_, itemCols, err := r.loadSalesInvoiceCols(ctx)
+	if err != nil || !itemCols["invoice_id"] || !itemCols["unit_price"] {
+		return err
+	}
+
+	sets := []string{}
+	if itemCols["foreign_unit_price"] {
+		sets = append(sets, "foreign_unit_price = CASE WHEN COALESCE(foreign_unit_price, 0) = 0 AND COALESCE(unit_price, 0) <> 0 THEN unit_price ELSE foreign_unit_price END")
+	}
+	if itemCols["item_currency_rate"] {
+		sets = append(sets, "item_currency_rate = CASE WHEN COALESCE(item_currency_rate, 0) = 0 THEN 1 ELSE item_currency_rate END")
+	}
+	if itemCols["item_currency_code"] {
+		sets = append(sets, "item_currency_code = CASE WHEN COALESCE(item_currency_code, '') = '' THEN 'INR' ELSE item_currency_code END")
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+
+	where := "invoice_id = ?"
+	if itemCols["park"] {
+		where += " AND COALESCE(park, 0) = 0"
+	}
+	_, err = r.db1.ExecContext(ctx, `UPDATE sales_invoice_item SET `+strings.Join(sets, ", ")+` WHERE `+where, salesInvoiceID)
+	return err
 }
 
 // roundFloat rounds f to d decimal places.
@@ -2011,6 +2057,9 @@ func (r *FranchiseInvoiceRepo) RegenerateSalesInvoiceDocument(ctx context.Contex
 		if err != nil {
 			return "", "", err
 		}
+	}
+	if err := r.repairSalesInvoiceItemCompatibility(ctx, salesInvoiceID); err != nil {
+		return "", "", fmt.Errorf("repair sales invoice item compatibility: %w", err)
 	}
 	r.ensureSalesInvoiceAnnexureJSON(ctx, salesInvoiceID)
 	attachmentPath, err := r.persistLegacyB2BSalesInvoiceDocumentWithMode(ctx, salesInvoiceID, resolvedInvoiceNo, true)
