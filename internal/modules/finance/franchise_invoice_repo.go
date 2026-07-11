@@ -914,7 +914,7 @@ func defaultFranchiseHSN(label string) string {
 	case "shirt":
 		return "620342"
 	case "royalty", "royality":
-		return "9997"
+		return "997339"
 	default:
 		return "9997"
 	}
@@ -2642,6 +2642,7 @@ func parseStoredParticulars(raw string) map[string]*ParticularItem {
 	for _, k := range fixedKeys {
 		result[k] = &ParticularItem{}
 	}
+	result["Royalty"].HSN = defaultFranchiseHSN("Royalty")
 	if raw == "" {
 		return result
 	}
@@ -2650,9 +2651,13 @@ func parseStoredParticulars(raw string) map[string]*ParticularItem {
 		return result
 	}
 	for k, v := range parsed {
+		hsn := toString(v["hsn"])
+		if strings.TrimSpace(hsn) == "" && isRoyaltyParticular(k) {
+			hsn = defaultFranchiseHSN(k)
+		}
 		result[k] = &ParticularItem{
 			Amount: toFloat(v["amount"]),
-			HSN:    toString(v["hsn"]),
+			HSN:    hsn,
 			IGST:   toFloat(v["igst"]),
 			CGST:   toFloat(v["cgst"]),
 			SGST:   toFloat(v["sgst"]),
