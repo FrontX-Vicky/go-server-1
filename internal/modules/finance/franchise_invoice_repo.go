@@ -192,6 +192,7 @@ func (r *FranchiseInvoiceRepo) CreateFranchiseInvoice(ctx context.Context, req C
 	if monthYear == "" {
 		monthYear = formatMonthYear(req.StartDate)
 	}
+	req.GrantTotal = math.Round(req.GrantTotal)
 
 	res, err := r.db1.ExecContext(ctx,
 		`INSERT INTO franchise_invoice
@@ -211,6 +212,7 @@ func (r *FranchiseInvoiceRepo) CreateFranchiseInvoice(ctx context.Context, req C
 
 // UpdateFranchiseInvoice updates an existing invoice (DB1).
 func (r *FranchiseInvoiceRepo) UpdateFranchiseInvoice(ctx context.Context, req UpdateFranchiseInvoiceRequest) error {
+	req.GrantTotal = math.Round(req.GrantTotal)
 	_, err := r.db1.ExecContext(ctx,
 		`UPDATE franchise_invoice
 		 SET invoice = ?, proforma = ?, grant_total = ?, other_items = ?, invoice_date = ?
@@ -360,6 +362,7 @@ func (r *FranchiseInvoiceRepo) CreateSubInvoice(ctx context.Context, req CreateS
 	if transferSectionKey != "" {
 		grantTotal = roundFloat(math.Abs(grantTotal), 2)
 	}
+	grantTotal = math.Round(grantTotal)
 	proforma := req.Proforma
 	if strings.TrimSpace(proforma) == "" {
 		proforma = fmt.Sprintf("%d", parentProforma)
@@ -663,6 +666,8 @@ type invoiceTotals struct {
 	SGSTTotal      float64
 	IGSTTotal      float64
 	TotalTaxAmount float64
+	BaseGrandTotal float64
+	RoundOffAmount float64
 	GrandTotal     float64
 }
 
@@ -914,7 +919,7 @@ func defaultFranchiseHSN(label string) string {
 	case "shirt":
 		return "620342"
 	case "royalty", "royality":
-		return "9997"
+		return "997339"
 	default:
 		return "9997"
 	}
@@ -992,7 +997,9 @@ func computeInvoiceTotals(items []salesLineItem) (invoiceTotals, []salesLineItem
 		}
 	}
 	t.TotalTaxAmount = roundFloat(t.CGSTTotal+t.SGSTTotal+t.IGSTTotal, 2)
-	t.GrandTotal = roundFloat(t.TaxableTotal+t.ExemptTotal+t.TotalTaxAmount, 2)
+	t.BaseGrandTotal = roundFloat(t.TaxableTotal+t.ExemptTotal+t.TotalTaxAmount, 2)
+	t.RoundOffAmount = roundFloat(math.Round(t.BaseGrandTotal)-t.BaseGrandTotal, 2)
+	t.GrandTotal = roundFloat(t.BaseGrandTotal+t.RoundOffAmount, 2)
 	return t, computed
 }
 
@@ -1712,6 +1719,9 @@ func (r *FranchiseInvoiceRepo) CreateSalesInvoiceFromSub(ctx context.Context, su
 		"sgst_amount":             totals.SGSTTotal,
 		"igst_amount":             totals.IGSTTotal,
 		"total_tax_amount":        totals.TotalTaxAmount,
+		"round_off_enabled":       1,
+		"round_off_amount":        totals.RoundOffAmount,
+		"base_grand_total":        totals.BaseGrandTotal,
 		"grand_total":             totals.GrandTotal,
 		"total_amount":            totals.GrandTotal,
 		"total_invoice_amount":    totals.GrandTotal,
@@ -2642,6 +2652,7 @@ func parseStoredParticulars(raw string) map[string]*ParticularItem {
 	for _, k := range fixedKeys {
 		result[k] = &ParticularItem{}
 	}
+	result["Royalty"].HSN = defaultFranchiseHSN("Royalty")
 	if raw == "" {
 		return result
 	}
@@ -2650,9 +2661,13 @@ func parseStoredParticulars(raw string) map[string]*ParticularItem {
 		return result
 	}
 	for k, v := range parsed {
+		hsn := toString(v["hsn"])
+		if strings.TrimSpace(hsn) == "" && isRoyaltyParticular(k) {
+			hsn = defaultFranchiseHSN(k)
+		}
 		result[k] = &ParticularItem{
 			Amount: toFloat(v["amount"]),
-			HSN:    toString(v["hsn"]),
+			HSN:    hsn,
 			IGST:   toFloat(v["igst"]),
 			CGST:   toFloat(v["cgst"]),
 			SGST:   toFloat(v["sgst"]),
