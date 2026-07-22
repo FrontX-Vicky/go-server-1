@@ -141,3 +141,72 @@ func (r *Repo) GetExpenseList(ctx context.Context, req ExpenseListRequest) (*Exp
 func sanitize(s string) string {
 	return strings.ReplaceAll(strings.TrimSpace(s), "'", "")
 }
+
+// FetchOptions fetches particulars and type heads for inline editing.
+func (r *Repo) FetchOptions(ctx context.Context) (*ExpenseOptions, error) {
+	opts := &ExpenseOptions{
+		Particulars: []ParticularOption{},
+		TypeHeads:   []TypeHeadOption{},
+	}
+
+	// 1. Fetch Particulars (expense_category)
+	catQuery := "SELECT id, category FROM expense_category WHERE park = 0 ORDER BY category ASC"
+	rows, err := r.db1.QueryContext(ctx, catQuery)
+	if err != nil {
+		return nil, fmt.Errorf("query particulars: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var p ParticularOption
+		if err := rows.Scan(&p.ID, &p.Category); err != nil {
+			return nil, fmt.Errorf("scan particular: %w", err)
+		}
+		opts.Particulars = append(opts.Particulars, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("particulars loop: %w", err)
+	}
+
+	// 2. Fetch Type Heads (expense_type_head_master_view)
+	thQuery := "SELECT id, reference_code, type_of_expense, type_head1, type_head2, type_head3 FROM expense_type_head_master_view WHERE park = 0 ORDER BY reference_code ASC"
+	thRows, err := r.db1.QueryContext(ctx, thQuery)
+	if err != nil {
+		return nil, fmt.Errorf("query type_heads: %w", err)
+	}
+	defer thRows.Close()
+
+	for thRows.Next() {
+		var t TypeHeadOption
+		if err := thRows.Scan(&t.ID, &t.ReferenceCode, &t.TypeOfExpense, &t.TypeHead1, &t.TypeHead2, &t.TypeHead3); err != nil {
+			return nil, fmt.Errorf("scan type_head: %w", err)
+		}
+		opts.TypeHeads = append(opts.TypeHeads, t)
+	}
+	if err := thRows.Err(); err != nil {
+		return nil, fmt.Errorf("type_heads loop: %w", err)
+	}
+
+	return opts, nil
+}
+
+// UpdateExpenseInline updates the editable fields of an expense record.
+func (r *Repo) UpdateExpenseInline(ctx context.Context, id int, req UpdateExpenseInlineRequest) error {
+	query := `
+		UPDATE expense 
+		SET ecat_id = ?, distribute_in = ?, type_head = ?, type_head1 = ?, type_head2 = ?, type_head3 = ?
+		WHERE id = ? AND park = 0
+	`
+	res, err := r.db1.ExecContext(ctx, query, req.EcatID, req.DistributeIn, req.TypeHead, req.TypeHead1, req.TypeHead2, req.TypeHead3, id)
+	if err != nil {
+		return fmt.Errorf("update expense: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("expense record %d not found or already parked", id)
+	}
+	return nil
+}

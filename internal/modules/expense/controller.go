@@ -80,3 +80,36 @@ func (ctl *Controller) handle(c *gin.Context, req ExpenseListRequest) {
 func parseBool(s string) bool {
 	return s == "1" || s == "true" || s == "yes"
 }
+
+// GET /api/v1/expense/options
+func (ctl *Controller) GetOptions(c *gin.Context) {
+	opts, err := ctl.Repo.FetchOptions(c.Request.Context())
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	httpx.OK(c, opts)
+}
+
+// PUT /api/v1/expense/:id
+func (ctl *Controller) UpdateInline(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var req UpdateExpenseInlineRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Fail(c, http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+
+	if err := ctl.Repo.UpdateExpenseInline(c.Request.Context(), id, req); err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	httpx.OK(c, gin.H{"success": true})
+}

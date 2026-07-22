@@ -91,3 +91,36 @@ type ExpenseListResponse struct {
 	Rows       []map[string]any  `json:"rows"`
 	Pagination ExpensePagination `json:"pagination"`
 }
+
+// ParticularOption represents an option for the Particulars dropdown.
+type ParticularOption struct {
+	ID       int    `json:"id"`
+	Category string `json:"category"`
+}
+
+// TypeHeadOption represents a mapped option for the Level 3 Detail combobox.
+type TypeHeadOption struct {
+	ID            int    `json:"id"`
+	ReferenceCode int    `json:"reference_code"`
+	TypeOfExpense string `json:"type_of_expense"`
+	TypeHead1     int    `json:"type_head1"`
+	TypeHead2     int    `json:"type_head2"`
+	TypeHead3     int    `json:"type_head3"`
+}
+
+// ExpenseOptions holds the dropdown options for expense inline editing.
+type ExpenseOptions struct {
+	Particulars []ParticularOption `json:"particulars"`
+	TypeHeads   []TypeHeadOption   `json:"type_heads"`
+}
+
+// UpdateExpenseInlineRequest represents the payload for inline editing an expense.
+type UpdateExpenseInlineRequest struct {
+	EcatID       int `json:"ecat_id"`
+	DistributeIn int `json:"distribute_in"`
+	TypeHead     int `json:"type_head"`
+	TypeHead1    int `json:"type_head1"`
+	TypeHead2    int `json:"type_head2"`
+	TypeHead3    int `json:"type_head3"`
+}
+
