@@ -150,7 +150,7 @@ func (r *Repo) FetchOptions(ctx context.Context) (*ExpenseOptions, error) {
 	}
 
 	// 1. Fetch Particulars (expense_category)
-	catQuery := "SELECT id, category FROM expense_category WHERE park = 0 ORDER BY category ASC"
+	catQuery := "SELECT id, category FROM expense_category ORDER BY category ASC"
 	rows, err := r.db1.QueryContext(ctx, catQuery)
 	if err != nil {
 		return nil, fmt.Errorf("query particulars: %w", err)
