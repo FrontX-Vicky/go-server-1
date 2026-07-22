@@ -10,6 +10,7 @@ import (
 	"server_1/internal/core/prism"
 	"server_1/internal/modules/communications"
 	"server_1/internal/modules/dynamicapi"
+	"server_1/internal/modules/expense"
 	"server_1/internal/modules/export"
 	"server_1/internal/modules/finance"
 	"server_1/internal/modules/leads"
@@ -42,6 +43,7 @@ func Build(cfg config.Config) *gin.Engine {
 	communications.MountRoutes(v1, prismClient, cfg)
 	dynamicapi.MountRoutes(v1, cfg.APIKeys.Dynamic, prismClient)
 	export.MountRoutes(v1, prismClient)
+	expense.MountRoutes(v1, prismClient)
 	finance.MountRoutes(v1, prismClient)
 	leads.MountRoutes(v1, prismClient)
 	openapi.MountRoutes(v1, cfg.APIKeys.Open)
