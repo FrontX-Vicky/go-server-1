@@ -13,4 +13,6 @@ func MountRoutes(v1 *gin.RouterGroup, checker prism.Checker) {
 
 	g.GET("", ctl.List)
 	g.POST("", ctl.Execute)
+	g.GET("/options", ctl.GetOptions)
+	g.PUT("/:id", ctl.UpdateInline)
 }
