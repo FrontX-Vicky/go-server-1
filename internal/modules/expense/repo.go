@@ -30,6 +30,7 @@ func (r *Repo) BuildQuery(ctx context.Context, req ExpenseListRequest) (string, 
 // buildQueryParts constructs the SELECT query and count query for expense_view.
 func (r *Repo) buildQueryParts(req ExpenseListRequest) (string, string, error) {
 	var conds []string
+	conds = append(conds, "park = 0")
 
 	if req.StartDate != "" {
 		conds = append(conds, fmt.Sprintf("date >= '%s'", sanitize(req.StartDate)))
