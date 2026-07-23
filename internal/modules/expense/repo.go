@@ -11,11 +11,13 @@ import (
 // Repo provides access to the expense_view.
 type Repo struct {
 	db1 *db.SQL
+	db2 *db.SQL
 }
 
 func NewRepo() *Repo {
 	return &Repo{
 		db1: db.DBx("DB1"),
+		db2: db.DBx("DB2"),
 	}
 }
 
@@ -149,9 +151,9 @@ func (r *Repo) FetchOptions(ctx context.Context) (*ExpenseOptions, error) {
 		TypeHeads:   []TypeHeadOption{},
 	}
 
-	// 1. Fetch Particulars (expense_category)
+	// 1. Fetch Particulars (expense_category from pf_central / DB2)
 	catQuery := "SELECT id, category FROM expense_category ORDER BY category ASC"
-	rows, err := r.db1.QueryContext(ctx, catQuery)
+	rows, err := r.db2.QueryContext(ctx, catQuery)
 	if err != nil {
 		return nil, fmt.Errorf("query particulars: %w", err)
 	}
@@ -168,9 +170,9 @@ func (r *Repo) FetchOptions(ctx context.Context) (*ExpenseOptions, error) {
 		return nil, fmt.Errorf("particulars loop: %w", err)
 	}
 
-	// 2. Fetch Type Heads (expense_type_head_master_view)
+	// 2. Fetch Type Heads (expense_type_head_master_view from pf_central / DB2)
 	thQuery := "SELECT id, reference_code, type_of_expense, type_head1, type_head2, type_head3 FROM expense_type_head_master_view WHERE park = 0 ORDER BY reference_code ASC"
-	thRows, err := r.db1.QueryContext(ctx, thQuery)
+	thRows, err := r.db2.QueryContext(ctx, thQuery)
 	if err != nil {
 		return nil, fmt.Errorf("query type_heads: %w", err)
 	}
