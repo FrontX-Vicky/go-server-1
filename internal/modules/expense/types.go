@@ -116,11 +116,11 @@ type ExpenseOptions struct {
 
 // UpdateExpenseInlineRequest represents the payload for inline editing an expense.
 type UpdateExpenseInlineRequest struct {
-	EcatID       int `json:"ecat_id"`
-	DistributeIn int `json:"distribute_in"`
-	TypeHead     int `json:"type_head"`
-	TypeHead1    int `json:"type_head1"`
-	TypeHead2    int `json:"type_head2"`
-	TypeHead3    int `json:"type_head3"`
+	EcatID       *int `json:"ecat_id,omitempty"`
+	DistributeIn *int `json:"distribute_in,omitempty"`
+	TypeHead     *int `json:"type_head,omitempty"`
+	TypeHead1    *int `json:"type_head1,omitempty"`
+	TypeHead2    *int `json:"type_head2,omitempty"`
+	TypeHead3    *int `json:"type_head3,omitempty"`
 }
 
