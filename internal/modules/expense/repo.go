@@ -30,6 +30,7 @@ func (r *Repo) BuildQuery(ctx context.Context, req ExpenseListRequest) (string, 
 // buildQueryParts constructs the SELECT query and count query for expense_view.
 func (r *Repo) buildQueryParts(req ExpenseListRequest) (string, string, error) {
 	var conds []string
+	conds = append(conds, "park = 0")
 
 	if req.StartDate != "" {
 		conds = append(conds, fmt.Sprintf("date >= '%s'", sanitize(req.StartDate)))
@@ -192,14 +193,44 @@ func (r *Repo) FetchOptions(ctx context.Context) (*ExpenseOptions, error) {
 	return opts, nil
 }
 
-// UpdateExpenseInline updates the editable fields of an expense record.
+// UpdateExpenseInline updates the editable fields of an expense record dynamically.
 func (r *Repo) UpdateExpenseInline(ctx context.Context, id int, req UpdateExpenseInlineRequest) error {
-	query := `
-		UPDATE expense 
-		SET ecat_id = ?, distribute_in = ?, type_head = ?, type_head1 = ?, type_head2 = ?, type_head3 = ?
-		WHERE id = ? AND park = 0
-	`
-	res, err := r.db1.ExecContext(ctx, query, req.EcatID, req.DistributeIn, req.TypeHead, req.TypeHead1, req.TypeHead2, req.TypeHead3, id)
+	var sets []string
+	var args []any
+
+	if req.EcatID != nil {
+		sets = append(sets, "ecat_id = ?")
+		args = append(args, *req.EcatID)
+	}
+	if req.DistributeIn != nil {
+		sets = append(sets, "distribute_in = ?")
+		args = append(args, *req.DistributeIn)
+	}
+	if req.TypeHead != nil {
+		sets = append(sets, "type_head = ?")
+		args = append(args, *req.TypeHead)
+	}
+	if req.TypeHead1 != nil {
+		sets = append(sets, "type_head1 = ?")
+		args = append(args, *req.TypeHead1)
+	}
+	if req.TypeHead2 != nil {
+		sets = append(sets, "type_head2 = ?")
+		args = append(args, *req.TypeHead2)
+	}
+	if req.TypeHead3 != nil {
+		sets = append(sets, "type_head3 = ?")
+		args = append(args, *req.TypeHead3)
+	}
+
+	if len(sets) == 0 {
+		return nil // nothing to update
+	}
+
+	query := fmt.Sprintf("UPDATE expense SET %s WHERE id = ? AND park = 0", strings.Join(sets, ", "))
+	args = append(args, id)
+
+	res, err := r.db1.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update expense: %w", err)
 	}
