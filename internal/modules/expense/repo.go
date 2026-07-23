@@ -170,9 +170,9 @@ func (r *Repo) FetchOptions(ctx context.Context) (*ExpenseOptions, error) {
 		return nil, fmt.Errorf("particulars loop: %w", err)
 	}
 
-	// 2. Fetch Type Heads (expense_type_head_master from pf_central / DB2)
+	// 2. Fetch Type Heads (expense_type_head_master from DB1)
 	thQuery := "SELECT id, reference_code, type_of_expense, type_head1, type_head2, type_head3 FROM expense_type_head_master WHERE park = 0 ORDER BY reference_code ASC"
-	thRows, err := r.db2.QueryContext(ctx, thQuery)
+	thRows, err := r.db1.QueryContext(ctx, thQuery)
 	if err != nil {
 		return nil, fmt.Errorf("query type_heads: %w", err)
 	}
